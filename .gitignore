@@ -1,0 +1,35 @@
+# Build output
+target/
+!.mvn/wrapper/maven-wrapper.jar
+*.class
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.classpath
+.project
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs and local state
+*.log
+/data/
+
+# ---------------------------------------------------------------------------
+# Real conversation exports must never be committed.
+#
+# Everything that looks like a chat export is ignored, and the synthetic
+# conversations under sample-data/ are the single explicit exception.
+# ---------------------------------------------------------------------------
+*.txt
+!sample-data/*.txt
+!**/src/test/resources/**/*.txt
+/exports/
+/imports/
+/private/
