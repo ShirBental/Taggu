@@ -1,0 +1,39 @@
+# Taggu runs against a local PostgreSQL by default. Nothing in this file points anywhere off the
+# machine, and nothing in the application makes an outbound call with imported data.
+
+spring:
+  application:
+    name: taggu
+  datasource:
+    url: ${TAGGU_DB_URL:jdbc:postgresql://localhost:5432/taggu}
+    username: ${TAGGU_DB_USER:taggu}
+    password: ${TAGGU_DB_PASSWORD:taggu}
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 50MB
+
+server:
+  port: ${TAGGU_PORT:8080}
+  # Local-first: bind to the loopback interface so an import is not reachable from the network.
+  address: ${TAGGU_BIND_ADDRESS:127.0.0.1}
+
+taggu:
+  # Chat exports record wall-clock time with no offset, so the zone is a decision, not a guess.
+  default-zone: ${TAGGU_DEFAULT_ZONE:UTC}
+  extraction:
+    enabled: true
+    focus-window-size: 8
+    lead-in-size: 4
+  sample-data:
+    enabled: ${TAGGU_LOAD_SAMPLE_DATA:false}
+    directory: ${TAGGU_SAMPLE_DATA_DIR:sample-data}
+
+logging:
+  level:
+    # Message text is never logged at any level, but keeping SQL quiet keeps bound parameters out too.
+    org.springframework.jdbc.core: INFO
+    com.taggu: INFO
