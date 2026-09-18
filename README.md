@@ -14,18 +14,61 @@ extraction interface and the knowledge models are the real thing; the rules behi
 
 ## Quick start
 
-You need Java 21, Maven and a PostgreSQL you can write to.
+### Prerequisites
+
+Java 21, Maven and a PostgreSQL you can write to. On macOS, with Homebrew:
 
 ```bash
-createdb taggu
-psql -c "CREATE ROLE taggu LOGIN PASSWORD 'taggu'" -c "ALTER DATABASE taggu OWNER TO taggu"
+brew install openjdk@21 maven postgresql@16
 
-mvn clean install
-TAGGU_LOAD_SAMPLE_DATA=true java -jar taggu-app/target/taggu-app-0.1.0-SNAPSHOT.jar
+# Homebrew keeps both of these off the default paths, so point macOS and the shell at them
+sudo ln -sfn $(brew --prefix)/opt/openjdk@21/libexec/openjdk.jdk /Library/Java/JavaVirtualMachines/openjdk-21.jdk
+echo 'export JAVA_HOME=$(/usr/libexec/java_home -v 21)' >> ~/.zshrc
+echo "export PATH=\"$(brew --prefix)/opt/postgresql@16/bin:\$PATH\"" >> ~/.zshrc
+exec zsh
 ```
 
-Flyway creates the schema on first start. The app listens on `127.0.0.1:8080` — the loopback
-interface, not the network.
+Check with `java -version`, `mvn -v` and `psql --version`.
+
+### Build
+
+```bash
+mvn clean install
+```
+
+That runs the tests too, and they need neither a database nor a network, so a green build tells you
+the code is sound before PostgreSQL is involved at all.
+
+### Database
+
+```bash
+brew services start postgresql@16          # or however your PostgreSQL starts
+
+createdb taggu
+psql -d postgres -c "CREATE ROLE taggu LOGIN PASSWORD 'taggu'" \
+                 -c "ALTER DATABASE taggu OWNER TO taggu"
+```
+
+`psql -d postgres` matters: with no database named, `psql` connects to one named after your account,
+which a fresh install usually does not have.
+
+You create no tables. Flyway builds the schema on first start.
+
+### Configure and run
+
+```bash
+cp config/application.yml.example config/application.yml
+$EDITOR config/application.yml
+
+java -jar taggu-app/target/taggu-app-0.1.0-SNAPSHOT.jar
+```
+
+Spring Boot reads `./config/application.yml` from the working directory and it overrides the packaged
+defaults. The file is gitignored, since it describes one machine and holds a database password.
+
+The app listens on `127.0.0.1:8080` — the loopback interface, not the network — and runs in the
+foreground, so Ctrl-C stops it. A healthy start applies two Flyway migrations and, if sample data is
+enabled, logs one line per imported conversation.
 
 Then:
 
@@ -40,23 +83,31 @@ To import an export of your own:
 ```bash
 curl -F file=@"WhatsApp Chat with Mom.txt" \
      -F title="Mom" \
-     -F zone="Europe/Berlin" \
+     -F zone="America/New_York" \
      localhost:8080/api/import/whatsapp
 ```
 
 `zone` matters. Chat exports record wall-clock time with no offset, so the zone is something you tell
-the importer rather than something it can read. It defaults to `TAGGU_DEFAULT_ZONE`, itself `UTC`.
+the importer rather than something it can read. Left out, it falls back to `taggu.default-zone`.
+Importing the same file twice is safe: it stores nothing the second time.
 
 ### Configuration
 
-| Variable | Default | What it does |
-| --- | --- | --- |
-| `TAGGU_DB_URL` | `jdbc:postgresql://localhost:5432/taggu` | Database to use |
-| `TAGGU_DB_USER` / `TAGGU_DB_PASSWORD` | `taggu` / `taggu` | Database credentials |
-| `TAGGU_PORT` | `8080` | HTTP port |
-| `TAGGU_BIND_ADDRESS` | `127.0.0.1` | Interface to bind to |
-| `TAGGU_DEFAULT_ZONE` | `UTC` | Zone used to read export timestamps |
-| `TAGGU_LOAD_SAMPLE_DATA` | `false` | Import `sample-data/` on startup |
+Settings come from three places, each overriding the one above it: the packaged defaults, your
+`config/application.yml`, and the environment. The file is the right place for a workstation; the
+environment variables are there for a container or a CI job, where a file would be awkward.
+
+| Setting in `config/application.yml` | Environment variable | Default | What it does |
+| --- | --- | --- | --- |
+| `spring.datasource.url` | `TAGGU_DB_URL` | `jdbc:postgresql://localhost:5432/taggu` | Database to use |
+| `spring.datasource.username` / `.password` | `TAGGU_DB_USER` / `TAGGU_DB_PASSWORD` | `taggu` / `taggu` | Database credentials |
+| `server.port` | `TAGGU_PORT` | `8080` | HTTP port |
+| `server.address` | `TAGGU_BIND_ADDRESS` | `127.0.0.1` | Interface to bind to |
+| `taggu.default-zone` | `TAGGU_DEFAULT_ZONE` | `UTC` | Zone used to read export timestamps |
+| `taggu.sample-data.enabled` | `TAGGU_LOAD_SAMPLE_DATA` | `false` | Import `sample-data/` on startup |
+| `taggu.extraction.enabled` | — | `true` | Run extraction after an import |
+| `taggu.extraction.focus-window-size` | — | `8` | Messages one extraction window owns |
+| `taggu.extraction.lead-in-size` | — | `4` | Earlier messages a window may read |
 
 ## Architecture
 

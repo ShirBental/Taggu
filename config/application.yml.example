@@ -1,0 +1,41 @@
+# Local settings for running Taggu.
+#
+# Copy this file to config/application.yml and edit it. Spring Boot reads ./config/application.yml
+# from the working directory on startup and it overrides the packaged defaults, so running the app
+# becomes:
+#
+#     java -jar taggu-app/target/taggu-app-0.1.0-SNAPSHOT.jar
+#
+# config/application.yml is gitignored, because it describes your machine and may hold a password.
+# Environment variables still work and still win over this file, which is what makes them the right
+# tool for a container or a CI job.
+
+taggu:
+  # Chat exports record wall-clock time with no offset, so the zone is a decision, not a guess.
+  # Set it to the zone the conversations were held in.
+  default-zone: America/New_York
+
+  sample-data:
+    # Import the synthetic conversations in sample-data/ on startup. Useful until you have imported
+    # something of your own; harmless afterwards, since re-importing stores nothing.
+    enabled: true
+    directory: sample-data
+
+  extraction:
+    enabled: true
+    # How many messages one extraction window is responsible for, and how many earlier messages it
+    # may read for context. "Want to come Sunday?" and "Around 4?" have to land in the same window.
+    focus-window-size: 8
+    lead-in-size: 4
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/taggu
+    username: taggu
+    password: taggu
+
+server:
+  port: 8080
+  # Local-first: loopback only, so an import is not reachable from the network. Change this and the
+  # machine's conversations are on the network.
+  address: 127.0.0.1

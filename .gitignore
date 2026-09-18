@@ -21,6 +21,13 @@ Thumbs.db
 *.log
 /data/
 
+# Local runtime settings: describes one machine, and may hold a database password.
+# config/application.yml.example is the committed template.
+/config/application.yml
+/config/application.properties
+/config/application-*.yml
+/config/application-*.properties
+
 # ---------------------------------------------------------------------------
 # Real conversation exports must never be committed.
 #
