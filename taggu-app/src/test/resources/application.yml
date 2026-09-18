@@ -1,0 +1,21 @@
+# The API tests run the whole pipeline against an in-memory H2 in PostgreSQL mode, applying the
+# project's own V1 migration. No Docker, no PostgreSQL, no network.
+spring:
+  datasource:
+    url: jdbc:h2:mem:taggu-app;MODE=PostgreSQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  flyway:
+    enabled: false
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:db/migration/V1__initial_schema.sql
+
+taggu:
+  default-zone: Europe/Berlin
+  extraction:
+    enabled: true
+  sample-data:
+    enabled: false
