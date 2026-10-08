@@ -96,7 +96,7 @@ public class SearchStore {
                  CROSS JOIN q
                   JOIN conversations c ON c.id = k.conversation_id
                   JOIN LATERAL (
-                           SELECT array_agg(s.message_id ORDER BY m.sent_at, m.source_message_id) AS ids,
+                           SELECT array_agg(s.message_id ORDER BY m.sent_at, m.source_order, m.source_message_id) AS ids,
                                   min(m.sent_at) AS first_at
                              FROM %s s
                              JOIN messages m ON m.id = s.message_id

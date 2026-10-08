@@ -13,6 +13,9 @@ import java.util.List;
  * <p>Each window owns a block of {@code focusSize} messages and is preceded by up to
  * {@code leadInSize} earlier messages for interpretation only. Focus blocks do not overlap, so every
  * message is the responsibility of exactly one window and knowledge is not extracted twice.
+ *
+ * <p>Messages are put in time order first. Those sharing a timestamp keep the order they arrive in,
+ * so callers should pass them in source order: a source that records time to the minute relies on it.
  */
 public final class ConversationWindower {
 
@@ -45,7 +48,10 @@ public final class ConversationWindower {
 
     public List<ExtractionContext> windows(Conversation conversation, List<CanonicalMessage> messages) {
         List<CanonicalMessage> ordered = new ArrayList<>(messages);
-        ordered.sort(Comparator.comparing(CanonicalMessage::sentAt).thenComparing(CanonicalMessage::sourceMessageId));
+        // A stable sort on time alone: messages with the same timestamp stay in the order they were
+        // given, which is the order of the source. Breaking the tie on sourceMessageId, as this once
+        // did, shuffled them, because for sources without real ids that id is a hash.
+        ordered.sort(Comparator.comparing(CanonicalMessage::sentAt));
 
         List<ExtractionContext> windows = new ArrayList<>();
         for (int start = 0; start < ordered.size(); start += focusSize) {

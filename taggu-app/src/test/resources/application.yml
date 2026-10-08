@@ -1,5 +1,5 @@
 # The API tests run the whole pipeline against an in-memory H2 in PostgreSQL mode, applying the
-# project's own V1 migration. No Docker, no PostgreSQL, no network.
+# project's own portable migrations (V1 and V5). No Docker, no PostgreSQL, no network.
 spring:
   datasource:
     url: jdbc:h2:mem:taggu-app;MODE=PostgreSQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE
@@ -11,7 +11,7 @@ spring:
   sql:
     init:
       mode: always
-      schema-locations: classpath:db/migration/V1__initial_schema.sql
+      schema-locations: classpath:db/migration/V1__initial_schema.sql,classpath:db/migration/V5__message_source_order.sql
 
 taggu:
   default-zone: Europe/Berlin

@@ -15,11 +15,11 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Gives each test a clean database built by the project's real V1 migration.
+ * Gives each test a clean database built by the project's real portable migrations, V1 and V5.
  *
  * <p>H2 in PostgreSQL mode stands in for PostgreSQL so the suite runs anywhere with no Docker. That
  * buys portability at a price worth naming: V2's plpgsql provenance triggers cannot run here, so they
- * are verified against a real PostgreSQL rather than by this suite. Everything V1 declares - tables,
+ * are verified against a real PostgreSQL rather than by this suite. Everything V1 and V5 declare - tables,
  * keys, uniqueness, cascades - is exercised exactly as it ships.
  *
  * <p>The test method itself runs outside a transaction, so the code under test manages its own.
@@ -39,6 +39,9 @@ abstract class PersistenceTestBase {
             ScriptUtils.executeSqlScript(connection, new EncodedResource(new ClassPathResource("sql/reset.sql")));
             ScriptUtils.executeSqlScript(
                     connection, new EncodedResource(new ClassPathResource("db/migration/V1__initial_schema.sql")));
+            ScriptUtils.executeSqlScript(
+                    connection,
+                    new EncodedResource(new ClassPathResource("db/migration/V5__message_source_order.sql")));
         }
     }
 }

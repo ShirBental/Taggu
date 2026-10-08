@@ -53,7 +53,7 @@ public class ConversationStore {
         List<CanonicalMessage> fresh = parsed.messages().stream()
                 .filter(message -> !existing.contains(message.sourceMessageId()))
                 .toList();
-        insertMessages(fresh);
+        insertMessages(fresh, positions(parsed.messages()));
 
         return new StoredConversation(conversation.id(), parsed.messages().size(), fresh.size());
     }
@@ -156,7 +156,20 @@ public class ConversationStore {
                 String.class));
     }
 
-    private void insertMessages(List<CanonicalMessage> messages) {
+    /**
+     * Where each message sits in the source it came from, starting at 1. Stored as
+     * {@code source_order} and used only to keep messages with the same timestamp in the order the
+     * source gave them.
+     */
+    private static Map<UUID, Integer> positions(List<CanonicalMessage> messages) {
+        Map<UUID, Integer> positions = new LinkedHashMap<>();
+        for (int index = 0; index < messages.size(); index++) {
+            positions.putIfAbsent(messages.get(index).id(), index + 1);
+        }
+        return positions;
+    }
+
+    private void insertMessages(List<CanonicalMessage> messages, Map<UUID, Integer> positions) {
         if (messages.isEmpty()) {
             return;
         }
@@ -170,6 +183,7 @@ public class ConversationStore {
                     .addValue("sourceMessageId", message.sourceMessageId())
                     .addValue("senderId", message.senderId())
                     .addValue("sentAt", timestamp(message.sentAt()))
+                    .addValue("sourceOrder", positions.get(message.id()))
                     .addValue("messageType", message.messageType().name())
                     .addValue("body", message.text())
                     .addValue("replyToMessageId", message.replyToMessageId())
@@ -183,9 +197,9 @@ public class ConversationStore {
         jdbc.batchUpdate(
                 """
                 INSERT INTO messages
-                    (id, conversation_id, source, source_message_id, sender_id, sent_at,
+                    (id, conversation_id, source, source_message_id, sender_id, sent_at, source_order,
                      message_type, body, reply_to_message_id, raw_content)
-                VALUES (:id, :conversationId, :source, :sourceMessageId, :senderId, :sentAt,
+                VALUES (:id, :conversationId, :source, :sourceMessageId, :senderId, :sentAt, :sourceOrder,
                         :messageType, :body, :replyToMessageId, :rawContent)
                 """,
                 rows.toArray(SqlParameterSource[]::new));
@@ -238,7 +252,7 @@ public class ConversationStore {
                   FROM messages m
                   LEFT JOIN participants p ON p.id = m.sender_id
                  WHERE m.conversation_id = :conversationId
-                 ORDER BY m.sent_at, m.source_message_id
+                 ORDER BY m.sent_at, m.source_order, m.source_message_id
                  LIMIT :limit OFFSET :offset
                 """,
                 new MapSqlParameterSource()

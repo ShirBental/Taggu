@@ -81,4 +81,27 @@ class ConversationStoreTest extends PersistenceTestBase {
         assertThat(store.findMessages(stored.conversationId(), 2, 2)).extracting(MessageView::text)
                 .containsExactly("Three");
     }
+
+    @Test
+    @DisplayName("messages sharing a timestamp come back in source order, page after page")
+    void keepsSourceOrderForEqualTimestamps() {
+        // Six messages at one instant. Their ids sort as m0..m5 here, so the texts are what is checked
+        // against the order they were said in; "ok" twice is two messages.
+        StoreFixtures fixture = new StoreFixtures("same-minute")
+                .allAtTheSameMoment()
+                .say("Mom", "Want to come Sunday?")
+                .say("Yael", "ok")
+                .say("Mom", "Around 4?")
+                .say("Yael", "ok")
+                .say("Mom", "Bring wine")
+                .say("Yael", "Will do");
+        var stored = store.save(fixture.parsed());
+
+        assertThat(stored.newMessages()).isEqualTo(6);
+        assertThat(store.findMessages(stored.conversationId(), 10, 0)).extracting(MessageView::text)
+                .containsExactly("Want to come Sunday?", "ok", "Around 4?", "ok", "Bring wine", "Will do");
+        assertThat(store.findMessages(stored.conversationId(), 4, 2)).extracting(MessageView::text)
+                .containsExactly("Around 4?", "ok", "Bring wine", "Will do");
+        assertThat(store.save(fixture.parsed()).newMessages()).isZero();
+    }
 }

@@ -28,7 +28,7 @@ class ImportApiPostgresTest extends ImportApiTest {
     @DynamicPropertySource
     static void postgres(DynamicPropertyRegistry registry) {
         PostgresTestDatabase.register(registry);
-        // The H2 configuration builds the schema from V1 alone at startup; here Flyway owns it.
+        // The H2 configuration builds the schema from the portable migrations at startup; here Flyway owns it.
         registry.add("spring.sql.init.mode", () -> "never");
     }
 

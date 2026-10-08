@@ -1,6 +1,7 @@
 package com.taggu.app;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
@@ -58,13 +59,16 @@ class ImportApiTest {
 
     private final ObjectMapper json = new ObjectMapper();
 
-    /** Each test starts from an empty database built by the project's own V1 migration. */
+    /** Each test starts from an empty database built by the project's own portable migrations. */
     @BeforeEach
     void resetSchema() throws SQLException {
         try (Connection connection = dataSource.getConnection()) {
             ScriptUtils.executeSqlScript(connection, new EncodedResource(new ClassPathResource("sql/reset.sql")));
             ScriptUtils.executeSqlScript(
                     connection, new EncodedResource(new ClassPathResource("db/migration/V1__initial_schema.sql")));
+            ScriptUtils.executeSqlScript(
+                    connection,
+                    new EncodedResource(new ClassPathResource("db/migration/V5__message_source_order.sql")));
         }
     }
 
@@ -144,6 +148,48 @@ class ImportApiTest {
                         .param("conversationId", "zones")
                         .param("zone", "Asia/Jerusalem"))
                 .andExpect(status().isOk())
+                .andExpect(jsonPath("$.newMessages").value(0));
+    }
+
+    @Test
+    @DisplayName("an exchange inside one minute keeps its order, its repeats and its meaning")
+    void sameMinuteExchangeKeepsItsOrder() throws Exception {
+        // Android records time to the minute, so this whole exchange has one timestamp.
+        String sameMinute =
+                """
+                14/03/2024, 18:02 - Mom: Want to come Sunday?
+                14/03/2024, 18:02 - Yael: Sure
+                14/03/2024, 18:02 - Mom: Around 4?
+                14/03/2024, 18:02 - Yael: Perfect
+                14/03/2024, 18:02 - Mom: ok
+                14/03/2024, 18:02 - Mom: ok
+                """;
+        MockMultipartFile file =
+                new MockMultipartFile("file", "same-minute.txt", "text/plain", sameMinute.getBytes(StandardCharsets.UTF_8));
+
+        String response = mockMvc.perform(multipart("/api/import/whatsapp").file(file))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.newMessages").value(6))
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        String conversationId = json.readTree(response).get("conversationId").asText();
+
+        mockMvc.perform(get("/api/conversations/{id}/messages", conversationId))
+                .andExpect(jsonPath("$.total").value(6))
+                .andExpect(jsonPath("$.messages[*].text")
+                        .value(contains("Want to come Sunday?", "Sure", "Around 4?", "Perfect", "ok", "ok")));
+
+        // The four messages only mean something in this order; extraction still reads them as one event.
+        JsonNode knowledge = json.readTree(mockMvc.perform(get("/api/conversations/{id}/knowledge", conversationId))
+                .andReturn()
+                .getResponse()
+                .getContentAsString());
+        assertThat(knowledge.get("events")).hasSize(1);
+        assertThat(knowledge.get("events").get(0).get("startsAt").asText()).startsWith("2024-03-17T15:00");
+        assertThat(knowledge.get("events").get(0).get("sourceMessageIds")).isNotEmpty();
+
+        mockMvc.perform(multipart("/api/import/whatsapp").file(file))
                 .andExpect(jsonPath("$.newMessages").value(0));
     }
 

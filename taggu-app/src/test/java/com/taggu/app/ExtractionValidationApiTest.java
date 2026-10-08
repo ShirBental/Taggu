@@ -70,6 +70,9 @@ class ExtractionValidationApiTest {
             ScriptUtils.executeSqlScript(connection, new EncodedResource(new ClassPathResource("sql/reset.sql")));
             ScriptUtils.executeSqlScript(
                     connection, new EncodedResource(new ClassPathResource("db/migration/V1__initial_schema.sql")));
+            ScriptUtils.executeSqlScript(
+                    connection,
+                    new EncodedResource(new ClassPathResource("db/migration/V5__message_source_order.sql")));
         }
     }
 

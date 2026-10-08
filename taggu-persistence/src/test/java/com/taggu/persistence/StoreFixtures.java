@@ -22,11 +22,18 @@ final class StoreFixtures {
     static final Instant START = Instant.parse("2024-03-14T17:02:00Z");
 
     private final String key;
+    private boolean sameMoment;
     private final Map<String, Participant> participants = new LinkedHashMap<>();
     private final List<CanonicalMessage> messages = new ArrayList<>();
 
     StoreFixtures(String key) {
         this.key = key;
+    }
+
+    /** Gives every message the same timestamp, as an export that records time to the minute does. */
+    StoreFixtures allAtTheSameMoment() {
+        this.sameMoment = true;
+        return this;
     }
 
     StoreFixtures say(String sender, String text) {
@@ -38,7 +45,7 @@ final class StoreFixtures {
                 sourceMessageId,
                 CanonicalIds.conversationId(SOURCE, key),
                 participant.id(),
-                START.plus(messages.size(), ChronoUnit.MINUTES),
+                sameMoment ? START : START.plus(messages.size(), ChronoUnit.MINUTES),
                 MessageType.TEXT,
                 text,
                 null,

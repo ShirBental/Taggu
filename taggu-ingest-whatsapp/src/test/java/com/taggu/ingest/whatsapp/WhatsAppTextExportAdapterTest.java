@@ -311,6 +311,54 @@ class WhatsAppTextExportAdapterTest {
     }
 
     @Test
+    @DisplayName("keeps distinct messages sent in the same second apart, and in file order")
+    void sameSecondMessagesStayDistinct() throws IOException {
+        String export = "[3/14/24, 9:05:10\u202FPM] Dana: Want to come Sunday?\n"
+                + "[3/14/24, 9:05:10\u202FPM] Ron: Sure\n"
+                + "[3/14/24, 9:05:10\u202FPM] Dana: Around 4?\n"
+                + "[3/14/24, 9:05:10\u202FPM] Ron: Sure\n";
+
+        ParsedConversation parsed = parse(export, ZoneId.of("UTC"));
+
+        assertThat(parsed.messages()).extracting(CanonicalMessage::text)
+                .containsExactly("Want to come Sunday?", "Sure", "Around 4?", "Sure");
+        assertThat(parsed.messages()).extracting(CanonicalMessage::sentAt).containsOnly(parsed.messages().get(0).sentAt());
+        // Even Ron's two identical messages, same second, same text, are two messages with two ids.
+        assertThat(parsed.messages()).extracting(CanonicalMessage::id).doesNotHaveDuplicates();
+        assertThat(parsed.messages()).extracting(CanonicalMessage::sourceMessageId).doesNotHaveDuplicates();
+    }
+
+    @Test
+    @DisplayName("keeps messages sharing a minute apart when the export has no seconds at all")
+    void sameMinuteMessagesStayDistinct() throws IOException {
+        String export = "14/03/2024, 18:03 - Yael: ok\n"
+                + "14/03/2024, 18:03 - Mom: ok\n"
+                + "14/03/2024, 18:03 - Yael: ok\n"
+                + "14/03/2024, 18:03 - Yael: ok\n";
+
+        ParsedConversation parsed = parse(export, ZoneId.of("UTC"));
+
+        assertThat(parsed.messages()).hasSize(4);
+        assertThat(parsed.messages()).extracting(CanonicalMessage::id).doesNotHaveDuplicates();
+        assertThat(parsed.messages()).extracting(message -> senderName(parsed, message))
+                .containsExactly("Yael", "Mom", "Yael", "Yael");
+    }
+
+    @Test
+    @DisplayName("gives repeated identical messages the same ids on every import, also when the export has grown")
+    void repeatedMessagesKeepTheirIdsAcrossImports() throws IOException {
+        String export = "14/03/2024, 18:03 - Yael: ok\n14/03/2024, 18:03 - Yael: ok\n";
+
+        List<String> first = ids(parse(export, ZoneId.of("UTC")));
+        List<String> again = ids(parse(export, ZoneId.of("UTC")));
+        List<String> grown = ids(parse(export + "14/03/2024, 18:03 - Yael: ok\n14/03/2024, 18:09 - Mom: bye\n", ZoneId.of("UTC")));
+
+        assertThat(again).isEqualTo(first);
+        assertThat(grown.subList(0, 2)).isEqualTo(first);
+        assertThat(grown).doesNotHaveDuplicates().hasSize(4);
+    }
+
+    @Test
     @DisplayName("keeps the original line so an import can be re-examined")
     void preservesRawContent() throws IOException {
         ParsedConversation parsed = WhatsAppFixtures.parse("normal-android.txt");
@@ -321,6 +369,10 @@ class WhatsAppTextExportAdapterTest {
     private static ParsedConversation parse(String export, ZoneId zone) throws IOException {
         return new WhatsAppTextExportAdapter()
                 .parse(new StringReader(export), com.taggu.core.source.ImportRequest.of("inline", "Inline", zone));
+    }
+
+    private static List<String> ids(ParsedConversation parsed) {
+        return parsed.messages().stream().map(CanonicalMessage::sourceMessageId).toList();
     }
 
     private static String sha256Hex(String value) {
