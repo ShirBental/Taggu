@@ -110,7 +110,7 @@ public final class WhatsAppTimestamps {
     }
 
     static Optional<LocalTime> parseTime(String time, String meridiem) {
-        String[] parts = time.split(":");
+        String[] parts = time.split("[:.]");
         if (parts.length < 2 || parts.length > 3) {
             return Optional.empty();
         }

@@ -146,6 +146,102 @@ class WhatsAppTextExportAdapterTest {
     }
 
     @Test
+    @DisplayName("an iOS notice attributed to a sender is a system message, and that sender is nobody")
+    void iosNoticesAreNotMessagesFromAParticipant() throws IOException {
+        // iOS writes notices as "Group name: <mark>text". \u200E is the mark, \u202F the space before PM.
+        String export = "[3/14/24, 9:05:10\u202FPM] Dana: hello\n"
+                + "[3/14/24, 9:06:00\u202FPM] Hike Group: \u200EDana created group \"Hike Group\"\n"
+                + "[3/14/24, 9:07:00\u202FPM] Hike Group: \u200EDana added Ron\n"
+                + "[3/14/24, 9:08:00\u202FPM] Ron: \u200ERon left\n"
+                + "[3/14/24, 9:09:00\u202FPM] Dana: \u200Eimage omitted\n";
+
+        ParsedConversation parsed = parse(export, ZoneId.of("UTC"));
+
+        assertThat(parsed.messages()).extracting(CanonicalMessage::messageType)
+                .containsExactly(
+                        MessageType.TEXT, MessageType.SYSTEM, MessageType.SYSTEM, MessageType.SYSTEM, MessageType.MEDIA);
+        assertThat(parsed.messages().subList(1, 4)).allSatisfy(notice -> assertThat(notice.senderId()).isNull());
+        assertThat(parsed.messages().get(2).text()).isEqualTo("Hike Group: Dana added Ron");
+        // "Hike Group" never spoke, and Ron only appears in notices.
+        assertThat(parsed.conversation().participants()).extracting(Participant::displayName)
+                .containsExactly("Dana");
+    }
+
+    @Test
+    @DisplayName("a person's message that merely sounds like a notice stays a message")
+    void noticeWordingAloneDoesNotMakeASystemMessage() throws IOException {
+        String export = "[3/14/24, 9:05:10\u202FPM] Dana: I added sugar and left it on the counter\n"
+                + "[3/14/24, 9:06:00\u202FPM] Ron: \u200EThanks!\n";
+
+        ParsedConversation parsed = parse(export, ZoneId.of("UTC"));
+
+        // The first has the wording but no platform mark; the second has the mark but not the wording.
+        assertThat(parsed.messages()).extracting(CanonicalMessage::messageType)
+                .containsExactly(MessageType.TEXT, MessageType.TEXT);
+        assertThat(parsed.messages()).extracting(message -> senderName(parsed, message))
+                .containsExactly("Dana", "Ron");
+    }
+
+    @Test
+    @DisplayName("removes WhatsApp's edited marker from the text and remembers it as metadata")
+    void stripsTheEditedMarker() throws IOException {
+        String export = "[3/14/24, 9:05:10\u202FPM] Dana: I added sugar \u200E<This message was edited>\n"
+                + "[3/14/24, 9:06:00\u202FPM] Ron: Two lines\nthen edited <This message was edited>\n"
+                + "[3/14/24, 9:07:00\u202FPM] Dana: Never edited\n";
+
+        ParsedConversation parsed = parse(export, ZoneId.of("UTC"));
+
+        assertThat(parsed.messages()).extracting(CanonicalMessage::text)
+                .containsExactly("I added sugar", "Two lines\nthen edited", "Never edited");
+        assertThat(parsed.messages().get(0).metadata()).containsEntry("edited", "true");
+        assertThat(parsed.messages().get(1).metadata()).containsEntry("edited", "true");
+        assertThat(parsed.messages().get(2).metadata()).doesNotContainKey("edited");
+        assertThat(parsed.messages().get(0).messageType()).isEqualTo(MessageType.TEXT);
+        // The untouched line is still there for anyone who needs to see what the export said.
+        assertThat(parsed.messages().get(0).rawContent()).contains("<This message was edited>");
+    }
+
+    @Test
+    @DisplayName("drops the tilde WhatsApp puts before the name of someone not in the contacts")
+    void stripsTheUnsavedContactTilde() throws IOException {
+        String export = "[3/14/24, 9:05:10\u202FPM] ~\u202FNoa: Hi, I'm new here\n"
+                + "[3/14/24, 9:06:00\u202FPM] Noa: Saved now\n"
+                + "[3/14/24, 9:07:00\u202FPM] ~ Avi: Sometimes it is a plain space\n";
+
+        ParsedConversation parsed = parse(export, ZoneId.of("UTC"));
+
+        assertThat(parsed.conversation().participants()).extracting(Participant::displayName)
+                .containsExactly("Noa", "Avi");
+        assertThat(parsed.messages().get(0).senderId()).isEqualTo(parsed.messages().get(1).senderId());
+    }
+
+    @Test
+    @DisplayName("reads times written with dots instead of colons")
+    void readsDottedTimes() throws IOException {
+        ParsedConversation parsed = WhatsAppFixtures.parse("dotted-times.txt");
+
+        assertThat(parsed.issues()).isEmpty();
+        assertThat(parsed.messages()).extracting(CanonicalMessage::text)
+                .containsExactly("Morning!", "Evening", "Still up");
+        assertThat(parsed.messages()).extracting(CanonicalMessage::sentAt)
+                .containsExactly(
+                        LocalDateTime.of(2024, 3, 12, 9, 15).atZone(WhatsAppFixtures.ZONE).toInstant(),
+                        LocalDateTime.of(2024, 3, 12, 21, 5).atZone(WhatsAppFixtures.ZONE).toInstant(),
+                        LocalDateTime.of(2024, 3, 13, 0, 10, 30).atZone(WhatsAppFixtures.ZONE).toInstant());
+    }
+
+    @Test
+    @DisplayName("reads past a byte-order mark and Windows line endings")
+    void readsByteOrderMarkAndWindowsLineEndings() throws IOException {
+        String export = "\uFEFF12/03/2024, 09:15 - Dana: Morning!\r\n12/03/2024, 09:16 - Ron: Hi\r\n";
+
+        ParsedConversation parsed = parse(export, ZoneId.of("UTC"));
+
+        assertThat(parsed.issues()).noneMatch(issue -> issue.severity() == ParseIssue.Severity.SKIPPED);
+        assertThat(parsed.messages()).extracting(CanonicalMessage::text).containsExactly("Morning!", "Hi");
+    }
+
+    @Test
     @DisplayName("infers month-first dates from a day above 12 in the file")
     void infersMonthFirstDatesFromTheFile() throws IOException {
         ParsedConversation parsed = WhatsAppFixtures.parse("us-format.txt");

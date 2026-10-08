@@ -131,9 +131,16 @@ public final class WhatsAppTextExportAdapter implements MessageSourceAdapter {
         }
 
         SenderAndText senderAndText = split.get();
+        MessageType type = WhatsAppContentClassifier.classify(senderAndText.text());
+        if (type == MessageType.TEXT
+                && WhatsAppLineParser.startsWithPlatformMark(raw, senderAndText.text())
+                && WhatsAppContentClassifier.isPlatformNotice(senderAndText.text())) {
+            // iOS attributes notices to a "sender", often the group's name. It is still the platform
+            // talking, and that name must not become a participant.
+            return new Draft(lineNumber, wallClock, sentAt, null, MessageType.SYSTEM, header.body(), raw);
+        }
         Participant participant = participants.computeIfAbsent(
                 senderAndText.sender(), name -> Participant.of(SOURCE, name, name));
-        MessageType type = WhatsAppContentClassifier.classify(senderAndText.text());
         return new Draft(lineNumber, wallClock, sentAt, participant.id(), type, senderAndText.text(), raw);
     }
 
@@ -229,6 +236,12 @@ public final class WhatsAppTextExportAdapter implements MessageSourceAdapter {
 
         private CanonicalMessage toMessage(UUID conversationId, ImportRequest request, Map<String, Integer> collisions) {
             String body = text.toString().stripTrailing();
+            Map<String, String> metadata = new LinkedHashMap<>();
+            metadata.put("lineNumber", Integer.toString(lineNumber));
+            if (senderId != null && WhatsAppContentClassifier.isEdited(body)) {
+                body = WhatsAppContentClassifier.withoutEditedMarker(body);
+                metadata.put("edited", "true");
+            }
             String sourceMessageId = deriveSourceMessageId(body, collisions);
             return new CanonicalMessage(
                     CanonicalIds.messageId(SOURCE, request.sourceConversationId(), sourceMessageId),
@@ -240,7 +253,7 @@ public final class WhatsAppTextExportAdapter implements MessageSourceAdapter {
                     type,
                     body,
                     null,
-                    Map.of("lineNumber", Integer.toString(lineNumber)),
+                    metadata,
                     raw.toString());
         }
 
