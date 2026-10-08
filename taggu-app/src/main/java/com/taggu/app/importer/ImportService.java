@@ -4,6 +4,7 @@ import com.taggu.app.config.TagguProperties;
 import com.taggu.app.importer.ImportSummary.ParseIssueView;
 import com.taggu.core.extraction.ConversationWindower;
 import com.taggu.core.extraction.ExtractionContext;
+import com.taggu.core.extraction.ExtractionValidator;
 import com.taggu.core.extraction.KnowledgeExtractor;
 import com.taggu.core.knowledge.ExtractionResult;
 import com.taggu.core.source.ImportRequest;
@@ -42,6 +43,7 @@ public class ImportService {
     private final KnowledgeStore knowledgeStore;
     private final ImportRunStore importRunStore;
     private final KnowledgeExtractor extractor;
+    private final ExtractionValidator validator;
     private final TagguProperties properties;
 
     public ImportService(
@@ -49,11 +51,13 @@ public class ImportService {
             KnowledgeStore knowledgeStore,
             ImportRunStore importRunStore,
             KnowledgeExtractor extractor,
+            ExtractionValidator validator,
             TagguProperties properties) {
         this.conversationStore = conversationStore;
         this.knowledgeStore = knowledgeStore;
         this.importRunStore = importRunStore;
         this.extractor = extractor;
+        this.validator = validator;
         this.properties = properties;
     }
 
@@ -79,7 +83,9 @@ public class ImportService {
             }
             ConversationStore.StoredConversation stored = conversationStore.save(parsed);
 
-            int knowledgeItems = properties.extraction().enabled() ? extractKnowledge(parsed, zone) : 0;
+            Extracted extracted =
+                    properties.extraction().enabled() ? extractKnowledge(parsed, zone) : new Extracted(0, 0);
+            int knowledgeItems = extracted.stored();
 
             importRunStore.succeed(
                     runId,
@@ -94,13 +100,14 @@ public class ImportService {
                     .count();
             log.info(
                     "Imported {} conversation: {} messages parsed, {} new, {} lines skipped, "
-                            + "{} other parse issues, {} knowledge items",
+                            + "{} other parse issues, {} knowledge items, {} rejected by validation",
                     adapter.source(),
                     stored.parsedMessages(),
                     stored.newMessages(),
                     skipped,
                     parsed.issues().size() - skipped,
-                    knowledgeItems);
+                    knowledgeItems,
+                    extracted.rejected());
             parsed.issues().forEach(issue -> log.debug("Import issue: {}", issue.summary()));
 
             return new ImportSummary(
@@ -110,6 +117,7 @@ public class ImportService {
                     stored.parsedMessages(),
                     stored.newMessages(),
                     knowledgeItems,
+                    extracted.rejected(),
                     parsed.issues().size(),
                     issueViews(parsed.issues(), options.includeRawLines()));
         } catch (IOException ex) {
@@ -121,18 +129,27 @@ public class ImportService {
         }
     }
 
-    private int extractKnowledge(ParsedConversation parsed, ZoneId zone) {
+    /**
+     * Extracts window by window, and lets nothing through to the store that the validator has not
+     * checked against the window it came from.
+     */
+    private Extracted extractKnowledge(ParsedConversation parsed, ZoneId zone) {
         ConversationWindower windower = new ConversationWindower(
                 properties.extraction().focusWindowSize(), properties.extraction().leadInSize(), zone);
         List<ExtractionContext> windows = windower.windows(parsed.conversation(), parsed.messages());
         List<ExtractionResult> results = new ArrayList<>(windows.size());
+        int rejected = 0;
         for (ExtractionContext window : windows) {
-            results.add(extractor.extract(window));
+            ExtractionValidator.Validated validated = validator.validate(window, extractor.extract(window));
+            results.add(validated.result());
+            rejected += validated.rejected();
         }
         ExtractionResult merged = ExtractionResult.merge(extractor.name(), results);
         knowledgeStore.save(parsed.conversation().id(), merged);
-        return merged.size();
+        return new Extracted(merged.size(), rejected);
     }
+
+    private record Extracted(int stored, int rejected) {}
 
     private List<ParseIssueView> issueViews(List<ParseIssue> issues, boolean includeRawLines) {
         return issues.stream()
