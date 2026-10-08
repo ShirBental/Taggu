@@ -191,6 +191,71 @@ class SearchStorePostgresTest extends PostgresPersistenceTestBase {
     }
 
     @Test
+    @DisplayName("does not stem: a word finds itself, not its other forms")
+    void doesNotStem() {
+        conversationStore.save(new StoreFixtures("roof").say("Dana", "He quoted two prices").parsed());
+
+        assertThat(texts("quoted")).hasSize(1);
+        assertThat(texts("quote")).isEmpty();
+        assertThat(texts("quotes")).isEmpty();
+        assertThat(texts("prices")).hasSize(1);
+        assertThat(texts("price")).isEmpty();
+    }
+
+    @Test
+    @DisplayName("splits numbers, hyphenated words, contractions and links the way PostgreSQL's parser does")
+    void tokenisesPredictably() {
+        conversationStore.save(new StoreFixtures("mixed")
+                .say("Dana", "He quoted $1,550")
+                .say("Ron", "A follow-up call")
+                .say("Dana", "Let's go")
+                .say("Ron", "See https://example.com/roof?id=42")
+                .say("Dana", "Meet at the caf\u00e9")
+                .parsed());
+
+        // A number with a separator is two words that must be adjacent; it is not the same number without.
+        assertThat(texts("1,550")).containsExactly("He quoted $1,550");
+        assertThat(texts("550")).containsExactly("He quoted $1,550");
+        assertThat(texts("1550")).isEmpty();
+        // A hyphenated word is found whole or by either part, but not run together.
+        assertThat(texts("follow-up")).hasSize(1);
+        assertThat(texts("follow")).hasSize(1);
+        assertThat(texts("followup")).isEmpty();
+        // A contraction is split at the apostrophe.
+        assertThat(texts("let")).hasSize(1);
+        assertThat(texts("let's")).hasSize(1);
+        assertThat(texts("lets")).isEmpty();
+        // A link is found by its host, not by words inside its path.
+        assertThat(texts("example.com")).hasSize(1);
+        assertThat(texts("roof")).isEmpty();
+        // Accents are significant.
+        assertThat(texts("caf\u00e9")).hasSize(1);
+        assertThat(texts("cafe")).isEmpty();
+    }
+
+    @Test
+    @DisplayName("ranks by how often and how close together the words appear, then by recency; length does not count")
+    void ranksByFrequencyProximityThenRecency() {
+        conversationStore.save(new StoreFixtures("roof")
+                .say("Dana", "roof")
+                .say("Ron", "a long message that goes on about many other things and mentions the roof only once")
+                .say("Dana", "the roof and, a good while later in the same message, the contractor")
+                .say("Ron", "roof contractor")
+                .parsed());
+
+        // One occurrence each: the short message does not outrank the long ones, so the newest comes first.
+        List<SearchHit> single = search.search("roof -contractor", null, 10);
+        assertThat(single).extracting(SearchHit::rank).containsOnly(single.get(0).rank());
+        assertThat(single).extracting(SearchHit::text)
+                .containsExactly(
+                        "a long message that goes on about many other things and mentions the roof only once", "roof");
+        // Both words adjacent beats both words far apart.
+        assertThat(texts("roof contractor"))
+                .containsExactly(
+                        "roof contractor", "the roof and, a good while later in the same message, the contractor");
+    }
+
+    @Test
     @DisplayName("works the same for text that is not English")
     void isLanguageNeutral() {
         conversationStore.save(new StoreFixtures("mixed")

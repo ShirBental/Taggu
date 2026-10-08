@@ -19,6 +19,15 @@ import org.springframework.stereotype.Repository;
  * insensitive, with the {@code simple} configuration: no stemming and no stop words, so it behaves the
  * same for every language at the cost of not matching "quote" to "quoted".
  *
+ * <p>Ranking is {@code ts_rank} with its defaults: a hit ranks higher the more often the words occur
+ * in it and the closer together they are. Length is not taken into account, so a one-word message and
+ * a paragraph that mention a word once rank the same; ties go to the more recent, by the time of the
+ * message or of a knowledge item's earliest evidence. Messages and knowledge are ranked on the same
+ * scale and interleaved. A {@code rank} is only meaningful next to others from the same query.
+ *
+ * <p>What it does not do: stemming, prefix or partial-word matching, typo tolerance, synonyms, or
+ * folding of accents. {@code SearchStorePostgresTest} pins each of these so a change is a decision.
+ *
  * <p>This class is the one place search is implemented. A different backend, or a semantic ranking
  * added beside this one, belongs behind the same method.
  */

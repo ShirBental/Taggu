@@ -188,7 +188,11 @@ every layer, deliberately:
    row reaching commit without a source row, whatever wrote it.
 5. PostgreSQL also keeps the evidence there afterwards (migration `V3`). A message that is cited
    cannot be deleted on its own, and the last source row of a knowledge row cannot be deleted or
-   re-pointed. Deleting a whole conversation still removes its messages and knowledge together.
+   re-pointed. Deleting a whole conversation still removes its messages and knowledge together. If
+   knowledge in one conversation cites a message in another, the cited conversation cannot be
+   deleted until the citing knowledge (or its conversation) is gone; the delete is refused rather
+   than stripping the evidence. Tags, entities and participants shared between conversations
+   survive the deletion of one of them.
 
 The API returns `sourceMessageIds` on every knowledge item, because a caller who cannot see the
 evidence cannot check the claim.
@@ -232,8 +236,18 @@ no ids. Re-importing the same export is therefore a no-op, and provenance record
 pointing at the right messages. The timestamp used is the wall-clock time written in the file, not
 the instant it resolves to, so importing the same export under a different `zone` is a no-op too.
 
-Migrations: `V1` is the schema, in SQL both PostgreSQL and H2 accept. `V2` to `V4` are PostgreSQL
-only: the provenance triggers, the protection of stored evidence, and full-text search.
+Messages that share a timestamp, which is most of a quick exchange in an export that records time to
+the minute, are kept in the order their source gave them (`messages.source_order`, migration `V5`).
+
+Migrations: `V1` is the schema and `V5` adds the source order; both are SQL that PostgreSQL and H2
+accept, and the fast test suite runs exactly these. `V2` to `V4` are PostgreSQL only: the provenance
+triggers, the protection of stored evidence, and full-text search.
+
+Upgrading an existing database needs nothing but starting the new version: Flyway applies `V3` to
+`V5` in order. They add constraints, triggers, columns and indexes and rewrite no stored text. `V4`
+and `V5` each rewrite the `messages` table once to add a column, which takes a moment on a large
+database. `V3` will fail, and leave the database at `V2`, only if `fact_sources` or its siblings
+somehow already point at messages that do not exist.
 
 ## API
 
@@ -258,8 +272,28 @@ knowledge. The fields a result always had (`messageId`, `conversationId`, `conve
 earliest evidence, and `senderName` is `null`.
 
 Matching is on whole words with the `simple` configuration: no stemming and no stop words. That makes
-it behave the same in every language, and means `contract` does not find `contractor` and `quote`
-does not find `quoted`.
+it behave the same in every language. What that means in practice, each pinned by a test in
+`SearchStorePostgresTest`:
+
+| Typed | Finds | Does not find |
+| --- | --- | --- |
+| `contractor` | "The **Contractor** called" (case is ignored) | |
+| `contract` | | "contractor" — no partial or prefix matching |
+| `quote` | | "quoted", "quotes" — no stemming |
+| `1,550` or `550` | "$1,550" | `1550` does not |
+| `follow` or `follow-up` | "a follow-up call" | `followup` does not |
+| `let` or `let's` | "Let's go" | `lets` does not |
+| `example.com` | a link to that host | words inside the link's path |
+| `café` | "café" | `cafe` does not — accents are significant |
+
+There is no typo tolerance and there are no synonyms. If a search comes back empty, try the exact
+form of the word as it was written.
+
+**Ranking** is PostgreSQL's `ts_rank` with its defaults. A result ranks higher the more often the
+words occur in it and the closer together they are. Length is not taken into account: a one-word
+message and a paragraph that each mention the word once rank the same. Ties go to the more recent.
+Messages and knowledge are ranked on one scale and interleaved, so a fact often appears next to the
+message it was extracted from. `rank` is only meaningful next to other results of the same query.
 
 Errors are `{status, error, message, timestamp}` and never quote the request or the file. A request
 that cannot be understood is a `400`, an unknown conversation a `404`, an oversized upload a `413`,
@@ -328,18 +362,22 @@ mvn verify
 
 There are two suites in one build.
 
-**The fast suite needs no Docker, no PostgreSQL and no network** (66 tests). Parser, extraction and
+**The fast suite needs no Docker, no PostgreSQL and no network** (72 tests). Parser, extraction and
 core tests need nothing at all. The store and API tests run on in-memory H2 in PostgreSQL mode,
-applying the project's own `V1` migration rather than a schema generated from the code.
+applying the project's own portable migrations (`V1` and `V5`) rather than a schema generated from
+the code.
 
-**The PostgreSQL suite** (57 more tests, classes named `*PostgresTest`) runs on a real PostgreSQL
+**The PostgreSQL suite** (68 more tests, classes named `*PostgresTest`) runs on a real PostgreSQL
 built by Flyway with every migration. H2 cannot run plpgsql, deferred constraints or full-text
 search, so this is where the database's own guarantees are asserted:
 
 - every store and API test of the fast suite, run a second time on PostgreSQL;
 - the `V2` triggers: knowledge without a source row fails at commit, for all four kinds;
-- the `V3` protection: cited messages and last source rows cannot be removed, conversations can;
-- full-text search, at the store and through the endpoint.
+- the `V3` protection: cited messages and last source rows cannot be removed, conversations can,
+  including when knowledge, tags, entities or participants are shared between conversations;
+- full-text search, at the store and through the endpoint, including what it ranks first and what
+  it deliberately does not match;
+- `V5` applied to a database that already holds messages.
 
 It starts a throwaway container with Testcontainers when Docker is available. Without Docker, point
 it at a dedicated database:
@@ -358,7 +396,7 @@ behaviour was not checked".
 | Module | Covers |
 | --- | --- |
 | `taggu-core` | provenance cannot be empty, id determinism, window slicing, extraction validation |
-| `taggu-ingest-whatsapp` | 21 parser tests over synthetic exports |
+| `taggu-ingest-whatsapp` | 24 parser tests over synthetic exports |
 | `taggu-extraction` | tags, entities, facts, events, actions, decisions, that every item cites evidence from its own window, and that nothing it returns is rejected by the validator |
 | `taggu-persistence` | stores and stores idempotently, knowledge round-trips with evidence; on PostgreSQL also triggers, evidence protection and search |
 | `taggu-app` | the whole pipeline through the HTTP API, request validation, and an extractor that cites evidence it was never shown |
@@ -366,7 +404,8 @@ behaviour was not checked".
 Parser tests cover normal messages, multiline messages, malformed lines, system messages (Android
 and iOS), multiple participants, punctuation and URLs, context-dependent exchanges, the iOS shape,
 month-first dates, dotted times, edited messages, unsaved-contact names, a byte-order mark with
-Windows line endings, and ids that do not depend on the import zone.
+Windows line endings, ids that do not depend on the import zone, and distinct messages (and exact
+repeats) sharing one second or one minute.
 
 All test data is invented. No real export is read by any test.
 
@@ -396,6 +435,9 @@ All test data is invented. No real export is read by any test.
   so their ids differ, and re-importing such an export adds them again beside the old rows.
 - **Notice wording is English.** An iOS export in another language has its sender-attributed notices
   stored as ordinary text.
+- **Order across two imports of one chat.** `source_order` is a position within one import. Two
+  messages with the same timestamp that arrive in different imports are ordered by those positions,
+  which is right when the second export continues the first and can be wrong if it starts mid-minute.
 - **Two exports of one chat from different phones can differ.** iOS writes seconds and Android does
   not, so the same message exported from each gets two ids.
 - **Extraction sees only the uploaded file.** A second, later export is extracted on its own, without
