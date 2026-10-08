@@ -72,6 +72,11 @@ public class ImportService {
         UUID runId = importRunStore.start(adapter.source().name(), options.sourceReference());
         try {
             ParsedConversation parsed = adapter.parse(reader, request);
+            if (parsed.messages().isEmpty()) {
+                // Not an export, or not one this adapter can read. Storing it would leave an empty
+                // conversation behind for every mistaken upload.
+                throw new ImportRejectedException("no messages could be read from the file");
+            }
             ConversationStore.StoredConversation stored = conversationStore.save(parsed);
 
             int knowledgeItems = properties.extraction().enabled() ? extractKnowledge(parsed, zone) : 0;
@@ -137,6 +142,16 @@ public class ImportService {
                         issue.reason(),
                         includeRawLines ? issue.rawLine() : null))
                 .toList();
+    }
+
+    /**
+     * Raised when a file was read but held nothing to import. The message is written for the caller
+     * and never quotes the file.
+     */
+    public static class ImportRejectedException extends RuntimeException {
+        public ImportRejectedException(String message) {
+            super(message);
+        }
     }
 
     /** Raised when an export cannot be read at all, as opposed to a line that cannot be parsed. */

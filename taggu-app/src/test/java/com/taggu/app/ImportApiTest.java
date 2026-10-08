@@ -1,6 +1,9 @@
 package com.taggu.app;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -19,6 +22,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.core.io.support.EncodedResource;
 import org.springframework.jdbc.datasource.init.ScriptUtils;
 import org.springframework.mock.web.MockMultipartFile;
@@ -165,6 +169,63 @@ class ImportApiTest {
         mockMvc.perform(get("/api/conversations/{id}/messages", "00000000-0000-0000-0000-000000000000"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.status").value(404));
+    }
+
+    @Test
+    @DisplayName("a file with no messages in it is refused, and leaves no conversation behind")
+    void rejectsAFileThatIsNotAnExport() throws Exception {
+        MockMultipartFile notes = new MockMultipartFile(
+                "file", "notes.txt", "text/plain", "shopping: milk, eggs\nnothing like a chat".getBytes(StandardCharsets.UTF_8));
+
+        mockMvc.perform(multipart("/api/import/whatsapp").file(notes))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.status").value(422))
+                .andExpect(jsonPath("$.message").value("no messages could be read from the file"))
+                .andExpect(content().string(not(containsString("milk"))));
+
+        mockMvc.perform(get("/api/conversations"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(0));
+        // The attempt is still on record, as a failure.
+        assertThat(new JdbcTemplate(dataSource).queryForList("SELECT status FROM import_runs", String.class))
+                .containsExactly("FAILED");
+    }
+
+    @Test
+    @DisplayName("an empty upload and a missing file are the caller's mistakes")
+    void rejectsEmptyAndMissingFiles() throws Exception {
+        mockMvc.perform(multipart("/api/import/whatsapp")
+                        .file(new MockMultipartFile("file", "empty.txt", "text/plain", new byte[0])))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").value("the uploaded file is empty"));
+
+        mockMvc.perform(multipart("/api/import/whatsapp")).andExpect(status().isBadRequest());
+    }
+
+    @Test
+    @DisplayName("an unknown zone is a 400 that says what was wrong, and imports nothing")
+    void rejectsAnUnknownZone() throws Exception {
+        mockMvc.perform(multipart("/api/import/whatsapp").file(export()).param("zone", "Mars/Olympus"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.message", containsString("time zone")));
+
+        mockMvc.perform(get("/api/conversations")).andExpect(jsonPath("$.length()").value(0));
+    }
+
+    @Test
+    @DisplayName("malformed requests get a 400, not a 500")
+    void malformedRequestsAreBadRequests() throws Exception {
+        mockMvc.perform(get("/api/search")).andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/search").param("q", "   ")).andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/search").param("q", "roof").param("conversationId", "not-a-uuid"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/search").param("q", "roof").param("limit", "many"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/conversations/{id}/messages", "not-a-uuid"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400));
+        mockMvc.perform(get("/api/no-such-endpoint")).andExpect(status().isNotFound());
     }
 
     private static MockMultipartFile export() {
