@@ -26,7 +26,7 @@ import org.springframework.transaction.annotation.Transactional;
  */
 @JdbcTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-@Import({ConversationStore.class, KnowledgeStore.class, ImportRunStore.class})
+@Import({ConversationStore.class, KnowledgeStore.class, ImportRunStore.class, SearchStore.class})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 abstract class PersistenceTestBase {
 

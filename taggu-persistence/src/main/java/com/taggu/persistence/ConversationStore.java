@@ -7,13 +7,11 @@ import com.taggu.core.source.ParsedConversation;
 import com.taggu.persistence.view.ConversationSummary;
 import com.taggu.persistence.view.MessageView;
 import com.taggu.persistence.view.ParticipantView;
-import com.taggu.persistence.view.SearchHit;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -267,45 +265,6 @@ public class ConversationStore {
         return count == null ? 0 : count;
     }
 
-    /**
-     * Case-insensitive substring search over message text.
-     *
-     * <p>Phase 1 deliberately stops here. It is portable, it needs no extension and no extra column,
-     * and it is honest about being a substring match rather than pretending to rank. Swapping in
-     * PostgreSQL full-text search means changing this one query.
-     */
-    public List<SearchHit> search(String query, UUID conversationId, int limit) {
-        String pattern = "%" + escapeLike(query.toLowerCase(Locale.ROOT)) + "%";
-        MapSqlParameterSource params =
-                new MapSqlParameterSource().addValue("pattern", pattern).addValue("limit", limit);
-        String scope = "";
-        if (conversationId != null) {
-            scope = " AND m.conversation_id = :conversationId";
-            params.addValue("conversationId", conversationId);
-        }
-        return jdbc.query(
-                """
-                SELECT m.id, m.conversation_id, c.title, p.display_name, m.sent_at, m.body
-                  FROM messages m
-                  JOIN conversations c ON c.id = m.conversation_id
-                  LEFT JOIN participants p ON p.id = m.sender_id
-                 WHERE lower(m.body) LIKE :pattern ESCAPE '\\'
-                """
-                        + scope
-                        + """
-                 ORDER BY m.sent_at DESC
-                 LIMIT :limit
-                """,
-                params,
-                (rs, rowNum) -> new SearchHit(
-                        rs.getObject("id", UUID.class),
-                        rs.getObject("conversation_id", UUID.class),
-                        rs.getString("title"),
-                        rs.getString("display_name"),
-                        instant(rs.getTimestamp("sent_at")),
-                        rs.getString("body")));
-    }
-
     private List<MessageView> withTags(List<MessageView> messages) {
         if (messages.isEmpty()) {
             return messages;
@@ -357,10 +316,6 @@ public class ConversationStore {
                                     rs.getString("source_identifier")));
                 });
         return byConversation;
-    }
-
-    private static String escapeLike(String value) {
-        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
     }
 
     static Timestamp timestamp(Instant instant) {

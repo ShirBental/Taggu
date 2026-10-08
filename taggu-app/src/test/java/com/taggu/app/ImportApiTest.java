@@ -30,7 +30,7 @@ import org.springframework.test.web.servlet.MockMvc;
 
 /**
  * Walks the whole pipeline the way a caller does: upload an export, then read back conversations,
- * messages, search results and knowledge.
+ * messages and knowledge. Search needs PostgreSQL and is covered by {@link ImportApiPostgresTest}.
  *
  * <p>The export below is invented, as all test data in this project is.
  */
@@ -51,7 +51,7 @@ class ImportApiTest {
             """;
 
     @Autowired
-    private MockMvc mockMvc;
+    MockMvc mockMvc;
 
     @Autowired
     private DataSource dataSource;
@@ -95,11 +95,6 @@ class ImportApiTest {
                 .andExpect(jsonPath("$.messages[0].text").value("Want to come Sunday?"))
                 .andExpect(jsonPath("$.messages[0].senderName").value("Mom"));
 
-        mockMvc.perform(get("/api/search").param("q", "quoted"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.count").value(1))
-                .andExpect(jsonPath("$.results[0].text").value(
-                        "The caterer quoted $220 for the dessert table"));
 
         String knowledge = mockMvc.perform(get("/api/conversations/{id}/knowledge", conversationId))
                 .andExpect(status().isOk())
@@ -228,7 +223,7 @@ class ImportApiTest {
         mockMvc.perform(get("/api/no-such-endpoint")).andExpect(status().isNotFound());
     }
 
-    private static MockMultipartFile export() {
+    static MockMultipartFile export() {
         return new MockMultipartFile(
                 "file", "sunday-dinner.txt", "text/plain", EXPORT.getBytes(StandardCharsets.UTF_8));
     }
