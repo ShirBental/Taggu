@@ -109,6 +109,110 @@ class ProvenanceProtectionPostgresTest extends PostgresPersistenceTestBase {
         assertThat(count("fact_sources") + count("event_sources")).isZero();
     }
 
+    @Test
+    @DisplayName("a conversation whose messages another conversation's knowledge cites cannot be deleted")
+    void conversationCitedFromAnotherCannotBeDeleted() {
+        UUID other = knowledgeInAnotherConversationCiting(cited);
+
+        // Nothing in the pipeline produces this today, but the schema allows it, so the schema has to
+        // answer for it: the delete is refused whole, rather than quietly stripping the other
+        // conversation's fact of its evidence.
+        assertThatThrownBy(() -> jdbc.update("DELETE FROM conversations WHERE id = ?", conversationId))
+                .hasStackTraceContaining("fk_fact_sources_message");
+
+        assertThat(count("conversations")).isEqualTo(2);
+        assertThat(count("messages")).isEqualTo(4);
+        assertThat(orphans()).isZero();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM facts WHERE conversation_id = ?", Long.class, other))
+                .isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("knowledge resting on two conversations survives neither losing its evidence nor blocking forever")
+    void sharedKnowledgeGoesWithItsOwnConversationFirst() {
+        UUID other = knowledgeInAnotherConversationCiting(cited);
+
+        // Deleting the conversation that owns the shared knowledge is always possible...
+        jdbc.update("DELETE FROM conversations WHERE id = ?", other);
+        assertThat(count("conversations")).isEqualTo(1);
+        assertThat(count("messages")).as("the cited conversation keeps its messages").isEqualTo(3);
+        assertThat(orphans()).isZero();
+
+        // ...and once nothing outside cites it, the cited conversation can go as well.
+        jdbc.update("DELETE FROM conversations WHERE id = ?", conversationId);
+        assertThat(count("messages")).isZero();
+        assertThat(count("facts") + count("events") + count("action_items") + count("decisions"))
+                .isZero();
+    }
+
+    @Test
+    @DisplayName("both conversations can be deleted together in one transaction")
+    void citedAndCitingConversationsCanBeDeletedTogether() {
+        UUID other = knowledgeInAnotherConversationCiting(cited);
+
+        transaction.executeWithoutResult(status -> {
+            jdbc.update("DELETE FROM conversations WHERE id = ?", conversationId);
+            jdbc.update("DELETE FROM conversations WHERE id = ?", other);
+        });
+
+        assertThat(count("conversations") + count("messages") + count("facts") + count("fact_sources"))
+                .isZero();
+    }
+
+    @Test
+    @DisplayName("deleting one conversation leaves shared tags, entities and participants to the others")
+    void sharedClassificationSurvivesDeletingOneConversation() {
+        StoreFixtures second = new StoreFixtures("car").say("Dana", "Nir Levy Ltd again");
+        UUID other = conversationStore.save(second.parsed()).conversationId();
+        for (StoreFixtures.Cited use : List.of(new StoreFixtures.Cited(conversationId, cited), new StoreFixtures.Cited(other, second.message(0).id()))) {
+            Provenance where = Provenance.ofMessages(use.messageId());
+            knowledgeStore.save(
+                    use.conversationId(),
+                    new ExtractionResult(
+                            "test-extractor",
+                            List.of(com.taggu.core.knowledge.Tag.of("house", 0.5, where)),
+                            List.of(com.taggu.core.knowledge.ExtractedEntity.of(
+                                    com.taggu.core.knowledge.EntityType.ORGANIZATION, "Nir Levy Ltd", 0.5, where)),
+                            List.of(),
+                            List.of(),
+                            List.of(),
+                            List.of()));
+        }
+        assertThat(count("entities")).isEqualTo(1);
+        assertThat(count("entity_mentions")).isEqualTo(2);
+
+        jdbc.update("DELETE FROM conversations WHERE id = ?", conversationId);
+
+        // The entity and tag are still there, still attached to the conversation that remains.
+        assertThat(count("entities")).isEqualTo(1);
+        assertThat(count("tags")).isEqualTo(1);
+        assertThat(count("entity_mentions")).isEqualTo(1);
+        assertThat(count("message_tags")).isEqualTo(1);
+        assertThat(knowledgeStore.findByConversation(other).entities()).singleElement().satisfies(entity -> {
+            assertThat(entity.name()).isEqualTo("Nir Levy Ltd");
+            assertThat(entity.mentionCount()).isEqualTo(1);
+        });
+        // Dana spoke in both; she is still a participant of the one that is left.
+        assertThat(conversationStore.findConversation(other).orElseThrow().participants())
+                .extracting(participant -> participant.displayName())
+                .containsExactly("Dana");
+    }
+
+    @Test
+    @DisplayName("deleting a conversation keeps the record of its imports, without the link")
+    void importRunsOutliveTheirConversation() {
+        UUID run = UUID.randomUUID();
+        jdbc.update(
+                "INSERT INTO import_runs (id, conversation_id, source, status, started_at) VALUES (?, ?, 'OTHER', 'SUCCEEDED', now())",
+                run,
+                conversationId);
+
+        jdbc.update("DELETE FROM conversations WHERE id = ?", conversationId);
+
+        assertThat(jdbc.queryForObject("SELECT conversation_id FROM import_runs WHERE id = ?", UUID.class, run))
+                .isNull();
+    }
+
     @ParameterizedTest(name = "{0}")
     @DisplayName("the last source row of a knowledge row cannot be deleted")
     @CsvSource({"fact_sources", "action_item_sources", "decision_sources"})
@@ -169,6 +273,27 @@ class ProvenanceProtectionPostgresTest extends PostgresPersistenceTestBase {
         });
 
         assertThat(count("facts")).isEqualTo(1);
+    }
+
+    /** A second conversation holding a fact whose evidence is its own message and one from the first. */
+    private UUID knowledgeInAnotherConversationCiting(UUID messageInFirstConversation) {
+        StoreFixtures second = new StoreFixtures("car").say("Ron", "Same price as the roof");
+        UUID other = conversationStore.save(second.parsed()).conversationId();
+        knowledgeStore.save(
+                other,
+                new ExtractionResult(
+                        "test-extractor",
+                        List.of(),
+                        List.of(),
+                        List.of(new Fact(
+                                "The car costs what the roof did",
+                                null,
+                                0.5,
+                                Provenance.ofMessages(second.message(0).id(), messageInFirstConversation))),
+                        List.of(),
+                        List.of(),
+                        List.of()));
+        return other;
     }
 
     private long orphans() {

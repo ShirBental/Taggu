@@ -68,4 +68,7 @@ final class StoreFixtures {
     CanonicalMessage message(int index) {
         return messages.get(index);
     }
+
+    /** A message and the conversation it is cited from, for tests that spread knowledge over several. */
+    record Cited(java.util.UUID conversationId, java.util.UUID messageId) {}
 }
