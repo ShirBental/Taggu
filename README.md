@@ -172,15 +172,23 @@ Sunday 16:00, citing three of the four messages.
 
 ### Provenance
 
-Every fact, event, action item and decision knows which messages support it. This is enforced three
-times over, deliberately:
+Every fact, event, action item and decision knows which messages support it. This is enforced at
+every layer, deliberately:
 
 1. `Provenance` cannot be constructed empty, so knowledge without evidence is not a representable
    value in the domain model.
-2. `KnowledgeStore` writes the `*_sources` rows in the same transaction as the item, and refuses
+2. `ExtractionValidator` checks what an extractor returns against the window it was shown, before
+   anything is stored. An item citing a message the extractor never saw, or resting on lead-in
+   messages alone, is dropped and counted (`rejectedKnowledgeItems` in the import response). The
+   rule-based extractor never trips this; it is there for the model-backed one, which can cite a
+   message that does not exist.
+3. `KnowledgeStore` writes the `*_sources` rows in the same transaction as the item, and refuses
    otherwise.
-3. PostgreSQL has a deferred constraint trigger per knowledge table (migration `V2`) that rejects any
+4. PostgreSQL has a deferred constraint trigger per knowledge table (migration `V2`) that rejects any
    row reaching commit without a source row, whatever wrote it.
+5. PostgreSQL also keeps the evidence there afterwards (migration `V3`). A message that is cited
+   cannot be deleted on its own, and the last source row of a knowledge row cannot be deleted or
+   re-pointed. Deleting a whole conversation still removes its messages and knowledge together.
 
 The API returns `sourceMessageIds` on every knowledge item, because a caller who cannot see the
 evidence cannot check the claim.
@@ -221,7 +229,11 @@ Three deviations from the tables listed in the brief, each on purpose:
 Identifiers are derived, not random: a message id is a hash of `(source, conversation, message
 identity)`, and a WhatsApp message's identity is its timestamp, sender and text, since exports carry
 no ids. Re-importing the same export is therefore a no-op, and provenance recorded earlier keeps
-pointing at the right messages.
+pointing at the right messages. The timestamp used is the wall-clock time written in the file, not
+the instant it resolves to, so importing the same export under a different `zone` is a no-op too.
+
+Migrations: `V1` is the schema, in SQL both PostgreSQL and H2 accept. `V2` to `V4` are PostgreSQL
+only: the provenance triggers, the protection of stored evidence, and full-text search.
 
 ## API
 
@@ -232,22 +244,44 @@ pointing at the right messages.
 | `GET` | `/api/conversations/{id}` | one conversation |
 | `GET` | `/api/conversations/{id}/messages` | paged with `limit` and `offset`, tags included |
 | `GET` | `/api/conversations/{id}/knowledge` | entities, facts, events, action items, decisions, each with `sourceMessageIds` |
-| `GET` | `/api/search?q=` | message text search, optionally scoped with `conversationId` |
+| `GET` | `/api/search?q=` | full-text search over messages and extracted knowledge, optionally scoped with `conversationId`, capped with `limit` |
 
-Search is a case-insensitive substring match with wildcards escaped. It is portable, needs no
-extension and no extra column, and it does not pretend to rank. Replacing it with PostgreSQL
-full-text search means changing one query in `ConversationStore`.
+Search is PostgreSQL full-text search (`V4`: a generated `tsvector` column and a GIN index on
+messages and on each knowledge table). `q` is read like a search box: every word must match, in any
+order; `"quoted words"` must appear together; `or` gives alternatives; a leading `-` excludes.
+Nothing typed into it is a syntax error. Results come best match first.
+
+Each result has a `kind` (`MESSAGE`, `FACT`, `EVENT`, `ACTION_ITEM`, `DECISION`), the `itemId` of
+what matched, a `rank`, and `sourceMessageIds`: the message itself, or the evidence behind the
+knowledge. The fields a result always had (`messageId`, `conversationId`, `conversationTitle`,
+`senderName`, `sentAt`, `text`) are still there for every kind; for knowledge they describe its
+earliest evidence, and `senderName` is `null`.
+
+Matching is on whole words with the `simple` configuration: no stemming and no stop words. That makes
+it behave the same in every language, and means `contract` does not find `contractor` and `quote`
+does not find `quoted`.
+
+Errors are `{status, error, message, timestamp}` and never quote the request or the file. A request
+that cannot be understood is a `400`, an unknown conversation a `404`, an oversized upload a `413`,
+and a file with no messages in it a `422` that stores nothing.
 
 ## The WhatsApp parser
 
 `WhatsAppTextExportAdapter` handles what real exports actually contain:
 
-- Android and iOS line shapes, 12-hour and 24-hour clocks, `dd/mm/yy` and `yyyy-mm-dd` dates.
+- Android and iOS line shapes, 12-hour and 24-hour clocks, `dd/mm/yy` and `yyyy-mm-dd` dates, and
+  times written with dots (`21.05`) as well as colons.
 - The invisible characters iOS inserts — left-to-right marks, narrow no-break spaces — which make an
   otherwise ordinary line unparseable.
 - Multiline messages: a line with no timestamp header belongs to the message above it.
 - System notices (`Dana added Ron`, encryption notices) as `SYSTEM` with no sender, told apart from
-  what people wrote by the absence of a `Sender: ` prefix.
+  what people wrote by the absence of a `Sender: ` prefix. iOS gives notices a sender, often the
+  group's name; those are recognised by the invisible mark iOS puts before platform-written text
+  together with the wording of the notice, so the group name does not become a participant. The
+  wording is matched in English only.
+- WhatsApp's own annotations: `<This message was edited>` is removed from the text and kept as
+  `edited` metadata, and the `~` before the name of someone not in the contacts is dropped, so
+  `~ Noa` and `Noa` are one participant.
 - Media, attachment, location, contact and deletion placeholders, classified rather than stored as
   something a participant said.
 - Malformed lines, which become a `ParseIssue` while the rest of the file still imports.
@@ -289,37 +323,52 @@ model-backed `KnowledgeExtractor` drops in behind the same interface and returns
 ## Tests
 
 ```bash
-mvn test
+mvn verify
 ```
 
-48 tests, no Docker and no network.
+There are two suites in one build.
+
+**The fast suite needs no Docker, no PostgreSQL and no network** (66 tests). Parser, extraction and
+core tests need nothing at all. The store and API tests run on in-memory H2 in PostgreSQL mode,
+applying the project's own `V1` migration rather than a schema generated from the code.
+
+**The PostgreSQL suite** (57 more tests, classes named `*PostgresTest`) runs on a real PostgreSQL
+built by Flyway with every migration. H2 cannot run plpgsql, deferred constraints or full-text
+search, so this is where the database's own guarantees are asserted:
+
+- every store and API test of the fast suite, run a second time on PostgreSQL;
+- the `V2` triggers: knowledge without a source row fails at commit, for all four kinds;
+- the `V3` protection: cited messages and last source rows cannot be removed, conversations can;
+- full-text search, at the store and through the endpoint.
+
+It starts a throwaway container with Testcontainers when Docker is available. Without Docker, point
+it at a dedicated database:
+
+```bash
+createdb taggu_test
+TAGGU_TEST_DB_URL=jdbc:postgresql://localhost:5432/taggu_test mvn verify
+```
+
+`TAGGU_TEST_DB_USER` and `TAGGU_TEST_DB_PASSWORD` are optional; the user defaults to your OS account.
+**Every test wipes that database**, so a URL whose database name does not contain `test` is refused.
+With neither Docker nor the variable, the PostgreSQL suite is skipped, not failed, and the build
+still passes on the fast suite alone. Read a green build with skipped tests as "the PostgreSQL-only
+behaviour was not checked".
 
 | Module | Covers |
 | --- | --- |
-| `taggu-core` | provenance cannot be empty, id determinism, window slicing |
-| `taggu-ingest-whatsapp` | 13 parser tests over 9 synthetic fixtures |
-| `taggu-extraction` | tags, entities, facts, events, actions, decisions, and that every item cites evidence from its own window |
-| `taggu-persistence` | stores and stores idempotently, search behaviour, knowledge round-trips with evidence |
-| `taggu-app` | the whole pipeline through the HTTP API |
+| `taggu-core` | provenance cannot be empty, id determinism, window slicing, extraction validation |
+| `taggu-ingest-whatsapp` | 21 parser tests over synthetic exports |
+| `taggu-extraction` | tags, entities, facts, events, actions, decisions, that every item cites evidence from its own window, and that nothing it returns is rejected by the validator |
+| `taggu-persistence` | stores and stores idempotently, knowledge round-trips with evidence; on PostgreSQL also triggers, evidence protection and search |
+| `taggu-app` | the whole pipeline through the HTTP API, request validation, and an extractor that cites evidence it was never shown |
 
-Parser fixtures cover normal messages, multiline messages, malformed lines, system messages, multiple
-participants, punctuation and URLs, context-dependent exchanges, the iOS shape and month-first dates.
+Parser tests cover normal messages, multiline messages, malformed lines, system messages (Android
+and iOS), multiple participants, punctuation and URLs, context-dependent exchanges, the iOS shape,
+month-first dates, dotted times, edited messages, unsaved-contact names, a byte-order mark with
+Windows line endings, and ids that do not depend on the import zone.
 
-### Testing persistence without Docker
-
-Tests run against in-memory H2 in PostgreSQL mode and apply the project's **own `V1` migration**,
-rather than a schema generated from the code, so the migration cannot drift from what the stores
-expect. `V1` is written in SQL that both databases accept; `V2` holds the plpgsql provenance triggers
-and is skipped, since H2 cannot run them.
-
-That is the honest limit of this setup, and it is where Testcontainers goes when it is wanted: a
-`@Testcontainers` PostgreSQL in `taggu-persistence` would run `V1` and `V2` together and let the
-trigger behaviour be asserted — an insert of a fact with no sources should fail at commit. The stores
-need no change for it; only `PersistenceTestBase` would gain a container-backed variant.
-
-(For the record, the `V2` triggers were verified by hand against PostgreSQL 16 during development:
-inserting a fact with no `fact_sources` row is rejected with `row facts.<id> was stored without
-provenance`.)
+All test data is invented. No real export is read by any test.
 
 ## Assumptions
 
@@ -333,21 +382,44 @@ provenance`.)
 - Exports are read fully into memory. They are single conversations, and the two-pass date inference
   needs to see the whole file.
 
+## Known limits
+
+- **Search needs PostgreSQL.** `GET /api/search` is PostgreSQL full-text search and does not run on
+  H2. H2 is a test stand-in only; the application is not meant to be run on it.
+- **Messages imported before ids ignored the zone.** Exports imported under the default `UTC` zone
+  keep the ids they had. Messages imported earlier under any other zone keep their old ids, so
+  re-importing such an export stores those messages once more.
+- **A re-import does not correct timestamps.** Importing an export again under a different zone is
+  now recognised as the same messages and skipped, which also means the stored `sentAt` values stay
+  as first imported.
+- **Edited messages and `~` names imported earlier.** Their text or sender is now read differently,
+  so their ids differ, and re-importing such an export adds them again beside the old rows.
+- **Notice wording is English.** An iOS export in another language has its sender-attributed notices
+  stored as ordinary text.
+- **Two exports of one chat from different phones can differ.** iOS writes seconds and Android does
+  not, so the same message exported from each gets two ids.
+- **Extraction sees only the uploaded file.** A second, later export is extracted on its own, without
+  the stored messages before it as context.
+- **Unexpected failures are logged with a stack trace at ERROR.** Exception messages from the
+  database can quote a row. Nothing is returned to the caller, but the local log is not content-free
+  in that case.
+- **No authentication.** The application binds to loopback and relies on that.
+
 ## Phase 2
 
 In rough order of what would pay off soonest:
 
 1. **A model-backed `KnowledgeExtractor`** behind the existing interface, with the rule-based one kept
    as a fallback and as a test oracle. `ExtractionResult` already records which extractor produced
-   each item, so results can be re-attributed when it lands.
-2. **PostgreSQL full-text search**: a `tsvector` column, a GIN index, and ranked results — one query
-   in `ConversationStore`.
-3. **Testcontainers** for the migrations and the `V2` triggers, as described above.
-4. **Entity resolution.** "Mom", "Mum" and a phone number are one person; `participants` is already
+   each item, and `ExtractionValidator` already stands between any extractor and the store.
+2. **Re-extraction as a job**: extraction currently runs inline with import, over the uploaded file
+   only. A model-backed extractor needs it to run over stored conversations, incrementally, with a
+   record of which windows have been processed by which extractor.
+3. **Entity resolution.** "Mom", "Mum" and a phone number are one person; `participants` is already
    keyed by source identity, ready for a merge table.
+4. **Semantic retrieval** beside full-text search, behind `SearchStore`.
 5. **A second source adapter** — Gmail or Telegram — which is the real test of whether the boundary
    holds.
-6. **Re-extraction as a job**: extraction currently runs inline with import, which is fine for one
-   file and not for a backfill of ten years.
-7. **Action item and event lifecycle**: marking things done, spotting a later message that cancels an
+6. **Action item and event lifecycle**: marking things done, spotting a later message that cancels an
    earlier plan.
+7. **Language-aware search**: a per-language text search configuration beside `simple`, for stemming.
