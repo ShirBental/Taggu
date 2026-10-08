@@ -5,7 +5,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.taggu.persistence.view.ConversationSummary;
 import com.taggu.persistence.view.MessageView;
 import com.taggu.persistence.view.ParticipantView;
-import com.taggu.persistence.view.SearchHit;
 import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -69,43 +68,6 @@ class ConversationStoreTest extends PersistenceTestBase {
     }
 
     @Test
-    @DisplayName("search matches text regardless of case")
-    void searchesCaseInsensitively() {
-        var stored = store.save(new StoreFixtures("roof")
-                .say("Dana", "The Contractor quoted 1550")
-                .say("Ron", "Fine by me")
-                .parsed());
-
-        List<SearchHit> hits = store.search("contractor", null, 10);
-
-        assertThat(hits).singleElement().satisfies(hit -> {
-            assertThat(hit.text()).isEqualTo("The Contractor quoted 1550");
-            assertThat(hit.conversationId()).isEqualTo(stored.conversationId());
-            assertThat(hit.senderName()).isEqualTo("Dana");
-        });
-    }
-
-    @Test
-    @DisplayName("search treats wildcard characters as text, not as a pattern")
-    void escapesWildcardsInSearch() {
-        store.save(new StoreFixtures("sale").say("Dana", "50% off today").say("Ron", "5 off").parsed());
-
-        assertThat(store.search("50%", null, 10)).hasSize(1);
-        assertThat(store.search("%", null, 10)).hasSize(1);
-        assertThat(store.search("_", null, 10)).isEmpty();
-    }
-
-    @Test
-    @DisplayName("search can be narrowed to one conversation")
-    void scopesSearchToAConversation() {
-        var roof = store.save(new StoreFixtures("roof").say("Dana", "quoted 1550").parsed());
-        store.save(new StoreFixtures("car").say("Ron", "quoted 900").parsed());
-
-        assertThat(store.search("quoted", null, 10)).hasSize(2);
-        assertThat(store.search("quoted", roof.conversationId(), 10)).hasSize(1);
-    }
-
-    @Test
     @DisplayName("messages page in time order")
     void pagesMessages() {
         var stored = store.save(new StoreFixtures("roof")
@@ -118,5 +80,28 @@ class ConversationStoreTest extends PersistenceTestBase {
                 .containsExactly("One", "Two");
         assertThat(store.findMessages(stored.conversationId(), 2, 2)).extracting(MessageView::text)
                 .containsExactly("Three");
+    }
+
+    @Test
+    @DisplayName("messages sharing a timestamp come back in source order, page after page")
+    void keepsSourceOrderForEqualTimestamps() {
+        // Six messages at one instant. Their ids sort as m0..m5 here, so the texts are what is checked
+        // against the order they were said in; "ok" twice is two messages.
+        StoreFixtures fixture = new StoreFixtures("same-minute")
+                .allAtTheSameMoment()
+                .say("Mom", "Want to come Sunday?")
+                .say("Yael", "ok")
+                .say("Mom", "Around 4?")
+                .say("Yael", "ok")
+                .say("Mom", "Bring wine")
+                .say("Yael", "Will do");
+        var stored = store.save(fixture.parsed());
+
+        assertThat(stored.newMessages()).isEqualTo(6);
+        assertThat(store.findMessages(stored.conversationId(), 10, 0)).extracting(MessageView::text)
+                .containsExactly("Want to come Sunday?", "ok", "Around 4?", "ok", "Bring wine", "Will do");
+        assertThat(store.findMessages(stored.conversationId(), 4, 2)).extracting(MessageView::text)
+                .containsExactly("Around 4?", "ok", "Bring wine", "Will do");
+        assertThat(store.save(fixture.parsed()).newMessages()).isZero();
     }
 }

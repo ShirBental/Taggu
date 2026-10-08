@@ -1,0 +1,40 @@
+name: Taggu CI
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: taggu_test
+          POSTGRES_USER: taggu_ci
+          POSTGRES_PASSWORD: taggu_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U taggu_ci -d taggu_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      TAGGU_TEST_DB_URL: jdbc:postgresql://localhost:5432/taggu_test
+      TAGGU_TEST_DB_USER: taggu_ci
+      TAGGU_TEST_DB_PASSWORD: taggu_ci
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Build and run tests
+        run: mvn --batch-mode --no-transfer-progress clean verify

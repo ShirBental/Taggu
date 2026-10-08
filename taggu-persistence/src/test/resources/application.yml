@@ -1,4 +1,4 @@
-# Tests run against an in-memory H2 in PostgreSQL mode, and apply the project's own V1 migration
+# Tests run against an in-memory H2 in PostgreSQL mode, and apply the project's own portable migrations (V1 and V5)
 # rather than a schema generated from the code, so the migration stays honest without Docker.
 spring:
   datasource:

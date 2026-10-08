@@ -62,4 +62,23 @@ class ConversationWindowerTest {
         assertThat(windows).singleElement().satisfies(window ->
                 assertThat(window.focus()).extracting(CanonicalMessage::text).containsExactly("a", "b", "c"));
     }
+
+    @Test
+    @DisplayName("messages sharing a timestamp stay in the order they were given")
+    void keepsSourceOrderForEqualTimestamps() {
+        // Ids chosen so that sorting on them would reverse the messages.
+        List<CanonicalMessage> sameMinute = List.of(
+                TestMessages.message("z-first", SENDER, START, "Want to come Sunday?"),
+                TestMessages.message("m-second", SENDER, START, "Sure"),
+                TestMessages.message("a-third", SENDER, START, "Around 4?"));
+        Conversation conversation = TestMessages.conversation(List.of(SENDER));
+
+        List<ExtractionContext> windows =
+                new ConversationWindower(2, 1, ZoneId.of("UTC")).windows(conversation, sameMinute);
+
+        assertThat(windows.get(0).focus()).extracting(CanonicalMessage::text)
+                .containsExactly("Want to come Sunday?", "Sure");
+        assertThat(windows.get(1).leadIn()).extracting(CanonicalMessage::text).containsExactly("Sure");
+        assertThat(windows.get(1).focus()).extracting(CanonicalMessage::text).containsExactly("Around 4?");
+    }
 }

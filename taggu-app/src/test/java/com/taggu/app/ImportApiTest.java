@@ -1,6 +1,10 @@
 package com.taggu.app;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -19,6 +23,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.core.io.support.EncodedResource;
 import org.springframework.jdbc.datasource.init.ScriptUtils;
 import org.springframework.mock.web.MockMultipartFile;
@@ -26,7 +31,7 @@ import org.springframework.test.web.servlet.MockMvc;
 
 /**
  * Walks the whole pipeline the way a caller does: upload an export, then read back conversations,
- * messages, search results and knowledge.
+ * messages and knowledge. Search needs PostgreSQL and is covered by {@link ImportApiPostgresTest}.
  *
  * <p>The export below is invented, as all test data in this project is.
  */
@@ -47,20 +52,23 @@ class ImportApiTest {
             """;
 
     @Autowired
-    private MockMvc mockMvc;
+    MockMvc mockMvc;
 
     @Autowired
     private DataSource dataSource;
 
     private final ObjectMapper json = new ObjectMapper();
 
-    /** Each test starts from an empty database built by the project's own V1 migration. */
+    /** Each test starts from an empty database built by the project's own portable migrations. */
     @BeforeEach
     void resetSchema() throws SQLException {
         try (Connection connection = dataSource.getConnection()) {
             ScriptUtils.executeSqlScript(connection, new EncodedResource(new ClassPathResource("sql/reset.sql")));
             ScriptUtils.executeSqlScript(
                     connection, new EncodedResource(new ClassPathResource("db/migration/V1__initial_schema.sql")));
+            ScriptUtils.executeSqlScript(
+                    connection,
+                    new EncodedResource(new ClassPathResource("db/migration/V5__message_source_order.sql")));
         }
     }
 
@@ -91,11 +99,6 @@ class ImportApiTest {
                 .andExpect(jsonPath("$.messages[0].text").value("Want to come Sunday?"))
                 .andExpect(jsonPath("$.messages[0].senderName").value("Mom"));
 
-        mockMvc.perform(get("/api/search").param("q", "quoted"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.count").value(1))
-                .andExpect(jsonPath("$.results[0].text").value(
-                        "The caterer quoted $220 for the dessert table"));
 
         String knowledge = mockMvc.perform(get("/api/conversations/{id}/knowledge", conversationId))
                 .andExpect(status().isOk())
@@ -131,6 +134,66 @@ class ImportApiTest {
     }
 
     @Test
+    @DisplayName("uploading the same export under a different zone stores nothing new")
+    void reimportUnderAnotherZoneIsIdempotent() throws Exception {
+        mockMvc.perform(multipart("/api/import/whatsapp")
+                        .file(export())
+                        .param("conversationId", "zones")
+                        .param("zone", "UTC"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.newMessages").value(7));
+
+        mockMvc.perform(multipart("/api/import/whatsapp")
+                        .file(export())
+                        .param("conversationId", "zones")
+                        .param("zone", "Asia/Jerusalem"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.newMessages").value(0));
+    }
+
+    @Test
+    @DisplayName("an exchange inside one minute keeps its order, its repeats and its meaning")
+    void sameMinuteExchangeKeepsItsOrder() throws Exception {
+        // Android records time to the minute, so this whole exchange has one timestamp.
+        String sameMinute =
+                """
+                14/03/2024, 18:02 - Mom: Want to come Sunday?
+                14/03/2024, 18:02 - Yael: Sure
+                14/03/2024, 18:02 - Mom: Around 4?
+                14/03/2024, 18:02 - Yael: Perfect
+                14/03/2024, 18:02 - Mom: ok
+                14/03/2024, 18:02 - Mom: ok
+                """;
+        MockMultipartFile file =
+                new MockMultipartFile("file", "same-minute.txt", "text/plain", sameMinute.getBytes(StandardCharsets.UTF_8));
+
+        String response = mockMvc.perform(multipart("/api/import/whatsapp").file(file))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.newMessages").value(6))
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        String conversationId = json.readTree(response).get("conversationId").asText();
+
+        mockMvc.perform(get("/api/conversations/{id}/messages", conversationId))
+                .andExpect(jsonPath("$.total").value(6))
+                .andExpect(jsonPath("$.messages[*].text")
+                        .value(contains("Want to come Sunday?", "Sure", "Around 4?", "Perfect", "ok", "ok")));
+
+        // The four messages only mean something in this order; extraction still reads them as one event.
+        JsonNode knowledge = json.readTree(mockMvc.perform(get("/api/conversations/{id}/knowledge", conversationId))
+                .andReturn()
+                .getResponse()
+                .getContentAsString());
+        assertThat(knowledge.get("events")).hasSize(1);
+        assertThat(knowledge.get("events").get(0).get("startsAt").asText()).startsWith("2024-03-17T15:00");
+        assertThat(knowledge.get("events").get(0).get("sourceMessageIds")).isNotEmpty();
+
+        mockMvc.perform(multipart("/api/import/whatsapp").file(file))
+                .andExpect(jsonPath("$.newMessages").value(0));
+    }
+
+    @Test
     @DisplayName("unreadable lines are echoed back only when the caller asks")
     void echoesRawLinesOnlyOnRequest() throws Exception {
         mockMvc.perform(multipart("/api/import/whatsapp")
@@ -149,7 +212,64 @@ class ImportApiTest {
                 .andExpect(jsonPath("$.status").value(404));
     }
 
-    private static MockMultipartFile export() {
+    @Test
+    @DisplayName("a file with no messages in it is refused, and leaves no conversation behind")
+    void rejectsAFileThatIsNotAnExport() throws Exception {
+        MockMultipartFile notes = new MockMultipartFile(
+                "file", "notes.txt", "text/plain", "shopping: milk, eggs\nnothing like a chat".getBytes(StandardCharsets.UTF_8));
+
+        mockMvc.perform(multipart("/api/import/whatsapp").file(notes))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.status").value(422))
+                .andExpect(jsonPath("$.message").value("no messages could be read from the file"))
+                .andExpect(content().string(not(containsString("milk"))));
+
+        mockMvc.perform(get("/api/conversations"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(0));
+        // The attempt is still on record, as a failure.
+        assertThat(new JdbcTemplate(dataSource).queryForList("SELECT status FROM import_runs", String.class))
+                .containsExactly("FAILED");
+    }
+
+    @Test
+    @DisplayName("an empty upload and a missing file are the caller's mistakes")
+    void rejectsEmptyAndMissingFiles() throws Exception {
+        mockMvc.perform(multipart("/api/import/whatsapp")
+                        .file(new MockMultipartFile("file", "empty.txt", "text/plain", new byte[0])))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").value("the uploaded file is empty"));
+
+        mockMvc.perform(multipart("/api/import/whatsapp")).andExpect(status().isBadRequest());
+    }
+
+    @Test
+    @DisplayName("an unknown zone is a 400 that says what was wrong, and imports nothing")
+    void rejectsAnUnknownZone() throws Exception {
+        mockMvc.perform(multipart("/api/import/whatsapp").file(export()).param("zone", "Mars/Olympus"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.message", containsString("time zone")));
+
+        mockMvc.perform(get("/api/conversations")).andExpect(jsonPath("$.length()").value(0));
+    }
+
+    @Test
+    @DisplayName("malformed requests get a 400, not a 500")
+    void malformedRequestsAreBadRequests() throws Exception {
+        mockMvc.perform(get("/api/search")).andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/search").param("q", "   ")).andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/search").param("q", "roof").param("conversationId", "not-a-uuid"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/search").param("q", "roof").param("limit", "many"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/conversations/{id}/messages", "not-a-uuid"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400));
+        mockMvc.perform(get("/api/no-such-endpoint")).andExpect(status().isNotFound());
+    }
+
+    static MockMultipartFile export() {
         return new MockMultipartFile(
                 "file", "sunday-dinner.txt", "text/plain", EXPORT.getBytes(StandardCharsets.UTF_8));
     }

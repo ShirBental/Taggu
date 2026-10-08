@@ -391,7 +391,9 @@ public class KnowledgeStore {
                 SELECT s.%s AS owner_id, s.message_id
                   FROM %s s
                   JOIN %s o ON o.id = s.%s
+                  JOIN messages m ON m.id = s.message_id
                  WHERE o.conversation_id = :conversationId
+                 ORDER BY m.sent_at, m.source_order, m.source_message_id
                 """
                         .formatted(ownerColumn, table, ownerTable, ownerColumn),
                 new MapSqlParameterSource("conversationId", conversationId),

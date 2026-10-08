@@ -1,5 +1,6 @@
 package com.taggu.app.config;
 
+import com.taggu.core.extraction.ExtractionValidator;
 import com.taggu.core.extraction.KnowledgeExtractor;
 import com.taggu.core.source.MessageSourceAdapter;
 import com.taggu.extraction.rule.RuleBasedKnowledgeExtractor;
@@ -19,6 +20,12 @@ public class PipelineConfiguration {
     @Bean
     public MessageSourceAdapter whatsAppTextExportAdapter() {
         return new WhatsAppTextExportAdapter();
+    }
+
+    /** Stands between any extractor and the store; see {@link ExtractionValidator}. */
+    @Bean
+    public ExtractionValidator extractionValidator() {
+        return new ExtractionValidator();
     }
 
     @Bean

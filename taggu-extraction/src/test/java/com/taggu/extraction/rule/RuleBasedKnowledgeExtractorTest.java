@@ -168,6 +168,32 @@ class RuleBasedKnowledgeExtractorTest {
     }
 
     @Test
+    @DisplayName("nothing it extracts is rejected by the validator, whatever the window size")
+    void honoursTheExtractionContract() {
+        ConversationFixture fixture = new ConversationFixture()
+                .say("Mom", "Want to come Sunday?")
+                .say("Yael", "Sure")
+                .say("Mom", "Around 4?")
+                .say("Yael", "Perfect")
+                .say("Mom", "The caterer quoted $220 for the dessert table")
+                .say("Yael", "Let's go with them")
+                .say("Yael", "I'll call them tomorrow")
+                .say("Mom", "Don't forget the school forms");
+        com.taggu.core.extraction.ExtractionValidator validator = new com.taggu.core.extraction.ExtractionValidator();
+
+        for (int focusSize = 1; focusSize <= 8; focusSize++) {
+            for (int leadInSize = 0; leadInSize <= 4; leadInSize++) {
+                for (var window : fixture.windows(focusSize, leadInSize)) {
+                    ExtractionResult result = extractor.extract(window);
+                    assertThat(validator.validate(window, result).rejected())
+                            .as("focus %d, lead-in %d", focusSize, leadInSize)
+                            .isZero();
+                }
+            }
+        }
+    }
+
+    @Test
     @DisplayName("a dated commitment is an action item, not also an event")
     void doesNotRecordACommitmentTwice() {
         ConversationFixture fixture = new ConversationFixture().say("Yael", "I'll call them tomorrow");

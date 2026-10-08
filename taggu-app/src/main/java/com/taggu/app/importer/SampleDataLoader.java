@@ -77,6 +77,9 @@ public class SampleDataLoader implements ApplicationRunner {
                     reader,
                     new ImportService.ImportOptions(
                             "sample/" + key, readableTitle(key), properties.defaultZone(), null, fileName, false));
+        } catch (ImportService.ImportRejectedException ex) {
+            // A stray text file in the sample directory should not stop the application starting.
+            log.warn("Skipped sample file {}: {}", fileName, ex.getMessage());
         }
     }
 

@@ -7,13 +7,11 @@ import com.taggu.core.source.ParsedConversation;
 import com.taggu.persistence.view.ConversationSummary;
 import com.taggu.persistence.view.MessageView;
 import com.taggu.persistence.view.ParticipantView;
-import com.taggu.persistence.view.SearchHit;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -55,7 +53,7 @@ public class ConversationStore {
         List<CanonicalMessage> fresh = parsed.messages().stream()
                 .filter(message -> !existing.contains(message.sourceMessageId()))
                 .toList();
-        insertMessages(fresh);
+        insertMessages(fresh, positions(parsed.messages()));
 
         return new StoredConversation(conversation.id(), parsed.messages().size(), fresh.size());
     }
@@ -158,7 +156,20 @@ public class ConversationStore {
                 String.class));
     }
 
-    private void insertMessages(List<CanonicalMessage> messages) {
+    /**
+     * Where each message sits in the source it came from, starting at 1. Stored as
+     * {@code source_order} and used only to keep messages with the same timestamp in the order the
+     * source gave them.
+     */
+    private static Map<UUID, Integer> positions(List<CanonicalMessage> messages) {
+        Map<UUID, Integer> positions = new LinkedHashMap<>();
+        for (int index = 0; index < messages.size(); index++) {
+            positions.putIfAbsent(messages.get(index).id(), index + 1);
+        }
+        return positions;
+    }
+
+    private void insertMessages(List<CanonicalMessage> messages, Map<UUID, Integer> positions) {
         if (messages.isEmpty()) {
             return;
         }
@@ -172,6 +183,7 @@ public class ConversationStore {
                     .addValue("sourceMessageId", message.sourceMessageId())
                     .addValue("senderId", message.senderId())
                     .addValue("sentAt", timestamp(message.sentAt()))
+                    .addValue("sourceOrder", positions.get(message.id()))
                     .addValue("messageType", message.messageType().name())
                     .addValue("body", message.text())
                     .addValue("replyToMessageId", message.replyToMessageId())
@@ -185,9 +197,9 @@ public class ConversationStore {
         jdbc.batchUpdate(
                 """
                 INSERT INTO messages
-                    (id, conversation_id, source, source_message_id, sender_id, sent_at,
+                    (id, conversation_id, source, source_message_id, sender_id, sent_at, source_order,
                      message_type, body, reply_to_message_id, raw_content)
-                VALUES (:id, :conversationId, :source, :sourceMessageId, :senderId, :sentAt,
+                VALUES (:id, :conversationId, :source, :sourceMessageId, :senderId, :sentAt, :sourceOrder,
                         :messageType, :body, :replyToMessageId, :rawContent)
                 """,
                 rows.toArray(SqlParameterSource[]::new));
@@ -240,7 +252,7 @@ public class ConversationStore {
                   FROM messages m
                   LEFT JOIN participants p ON p.id = m.sender_id
                  WHERE m.conversation_id = :conversationId
-                 ORDER BY m.sent_at, m.source_message_id
+                 ORDER BY m.sent_at, m.source_order, m.source_message_id
                  LIMIT :limit OFFSET :offset
                 """,
                 new MapSqlParameterSource()
@@ -265,45 +277,6 @@ public class ConversationStore {
                 new MapSqlParameterSource("conversationId", conversationId),
                 Long.class);
         return count == null ? 0 : count;
-    }
-
-    /**
-     * Case-insensitive substring search over message text.
-     *
-     * <p>Phase 1 deliberately stops here. It is portable, it needs no extension and no extra column,
-     * and it is honest about being a substring match rather than pretending to rank. Swapping in
-     * PostgreSQL full-text search means changing this one query.
-     */
-    public List<SearchHit> search(String query, UUID conversationId, int limit) {
-        String pattern = "%" + escapeLike(query.toLowerCase(Locale.ROOT)) + "%";
-        MapSqlParameterSource params =
-                new MapSqlParameterSource().addValue("pattern", pattern).addValue("limit", limit);
-        String scope = "";
-        if (conversationId != null) {
-            scope = " AND m.conversation_id = :conversationId";
-            params.addValue("conversationId", conversationId);
-        }
-        return jdbc.query(
-                """
-                SELECT m.id, m.conversation_id, c.title, p.display_name, m.sent_at, m.body
-                  FROM messages m
-                  JOIN conversations c ON c.id = m.conversation_id
-                  LEFT JOIN participants p ON p.id = m.sender_id
-                 WHERE lower(m.body) LIKE :pattern ESCAPE '\\'
-                """
-                        + scope
-                        + """
-                 ORDER BY m.sent_at DESC
-                 LIMIT :limit
-                """,
-                params,
-                (rs, rowNum) -> new SearchHit(
-                        rs.getObject("id", UUID.class),
-                        rs.getObject("conversation_id", UUID.class),
-                        rs.getString("title"),
-                        rs.getString("display_name"),
-                        instant(rs.getTimestamp("sent_at")),
-                        rs.getString("body")));
     }
 
     private List<MessageView> withTags(List<MessageView> messages) {
@@ -357,10 +330,6 @@ public class ConversationStore {
                                     rs.getString("source_identifier")));
                 });
         return byConversation;
-    }
-
-    private static String escapeLike(String value) {
-        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
     }
 
     static Timestamp timestamp(Instant instant) {

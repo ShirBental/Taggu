@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.Reader;
 import java.nio.charset.StandardCharsets;
+import java.time.DateTimeException;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Locale;
@@ -53,6 +54,9 @@ public class ImportController {
             @RequestParam(value = "includeRawLines", defaultValue = "false") boolean includeRawLines)
             throws IOException {
 
+        if (file.isEmpty()) {
+            throw new BadRequestException("the uploaded file is empty");
+        }
         String fileName = file.getOriginalFilename() == null ? "whatsapp-export.txt" : file.getOriginalFilename();
         String key = conversationId == null || conversationId.isBlank() ? conversationKey(fileName) : conversationId;
 
@@ -63,10 +67,21 @@ public class ImportController {
                     new ImportOptions(
                             key,
                             title == null || title.isBlank() ? key : title,
-                            zone == null || zone.isBlank() ? null : ZoneId.of(zone),
+                            zoneOrNull(zone),
                             localeHint,
                             fileName,
                             includeRawLines));
+        }
+    }
+
+    private static ZoneId zoneOrNull(String zone) {
+        if (zone == null || zone.isBlank()) {
+            return null;
+        }
+        try {
+            return ZoneId.of(zone.trim());
+        } catch (DateTimeException ex) {
+            throw new BadRequestException("zone is not a known time zone; use an IANA name such as Europe/Berlin");
         }
     }
 
