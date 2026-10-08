@@ -185,11 +185,56 @@ class WhatsAppTextExportAdapterTest {
     }
 
     @Test
+    @DisplayName("gives a message the same id whatever zone the export is read in")
+    void idsDoNotDependOnTheImportZone() throws IOException {
+        String export = "12/03/2024, 23:30 - Dana: Late one\n13/03/2024, 00:10 - Ron: Later still\n";
+
+        ParsedConversation utc = parse(export, ZoneId.of("UTC"));
+        ParsedConversation berlin = parse(export, ZoneId.of("Europe/Berlin"));
+        ParsedConversation auckland = parse(export, ZoneId.of("Pacific/Auckland"));
+
+        // The zone moves the instant, as it should...
+        assertThat(berlin.messages().get(0).sentAt()).isNotEqualTo(utc.messages().get(0).sentAt());
+        // ...but not the identity, or re-importing under another zone would store everything twice.
+        assertThat(berlin.messages()).extracting(CanonicalMessage::id)
+                .isEqualTo(utc.messages().stream().map(CanonicalMessage::id).toList());
+        assertThat(auckland.messages()).extracting(CanonicalMessage::sourceMessageId)
+                .isEqualTo(utc.messages().stream().map(CanonicalMessage::sourceMessageId).toList());
+    }
+
+    @Test
+    @DisplayName("keeps the ids that exports imported under UTC were given before ids ignored the zone")
+    void idsOfUtcImportsAreUnchanged() throws IOException {
+        ParsedConversation parsed = parse("12/03/2024, 09:15 - Dana: Morning!\n", ZoneId.of("UTC"));
+
+        // sha256("2024-03-12T09:15:00Z|<Dana's participant id>|Morning!"), first 16 hex characters:
+        // the identity string the adapter has always used for a UTC import, written out by hand.
+        String dana = com.taggu.core.model.CanonicalIds.participantId(SourceType.WHATSAPP, "Dana").toString();
+        assertThat(parsed.messages().get(0).sourceMessageId())
+                .isEqualTo(sha256Hex("2024-03-12T09:15:00Z|" + dana + "|Morning!").substring(0, 16));
+    }
+
+    @Test
     @DisplayName("keeps the original line so an import can be re-examined")
     void preservesRawContent() throws IOException {
         ParsedConversation parsed = WhatsAppFixtures.parse("normal-android.txt");
 
         assertThat(parsed.messages().get(0).rawContent()).isEqualTo("12/03/2024, 09:15 - Dana: Morning!");
+    }
+
+    private static ParsedConversation parse(String export, ZoneId zone) throws IOException {
+        return new WhatsAppTextExportAdapter()
+                .parse(new StringReader(export), com.taggu.core.source.ImportRequest.of("inline", "Inline", zone));
+    }
+
+    private static String sha256Hex(String value) {
+        try {
+            return java.util.HexFormat.of()
+                    .formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                            .digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException ex) {
+            throw new IllegalStateException(ex);
+        }
     }
 
     private static String senderName(ParsedConversation parsed, CanonicalMessage message) {

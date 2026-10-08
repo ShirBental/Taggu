@@ -20,6 +20,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -120,19 +121,20 @@ public final class WhatsAppTextExportAdapter implements MessageSourceAdapter {
             issues.add(ParseIssue.skipped(lineNumber, "unreadable timestamp in message header", raw));
             return null;
         }
-        Instant sentAt = localDateTime.get().atZone(request.zone()).toInstant();
+        LocalDateTime wallClock = localDateTime.get();
+        Instant sentAt = wallClock.atZone(request.zone()).toInstant();
 
         Optional<SenderAndText> split = WhatsAppLineParser.splitSender(header.body());
         if (split.isEmpty()) {
             // No sender means WhatsApp itself wrote the line: a join, a leave, an encryption notice.
-            return new Draft(lineNumber, sentAt, null, MessageType.SYSTEM, header.body(), raw);
+            return new Draft(lineNumber, wallClock, sentAt, null, MessageType.SYSTEM, header.body(), raw);
         }
 
         SenderAndText senderAndText = split.get();
         Participant participant = participants.computeIfAbsent(
                 senderAndText.sender(), name -> Participant.of(SOURCE, name, name));
         MessageType type = WhatsAppContentClassifier.classify(senderAndText.text());
-        return new Draft(lineNumber, sentAt, participant.id(), type, senderAndText.text(), raw);
+        return new Draft(lineNumber, wallClock, sentAt, participant.id(), type, senderAndText.text(), raw);
     }
 
     private WhatsAppDateOrder detectOrder(List<String> rawLines, ImportRequest request, List<ParseIssue> issues) {
@@ -192,14 +194,23 @@ public final class WhatsAppTextExportAdapter implements MessageSourceAdapter {
     /** A message being assembled, still collecting its continuation lines. */
     private static final class Draft {
         private final int lineNumber;
+        private final LocalDateTime wallClock;
         private final Instant sentAt;
         private final UUID senderId;
         private final StringBuilder text;
         private final StringBuilder raw;
         private MessageType type;
 
-        private Draft(int lineNumber, Instant sentAt, UUID senderId, MessageType type, String text, String raw) {
+        private Draft(
+                int lineNumber,
+                LocalDateTime wallClock,
+                Instant sentAt,
+                UUID senderId,
+                MessageType type,
+                String text,
+                String raw) {
             this.lineNumber = lineNumber;
+            this.wallClock = wallClock;
             this.sentAt = sentAt;
             this.senderId = senderId;
             this.type = type;
@@ -237,9 +248,15 @@ public final class WhatsAppTextExportAdapter implements MessageSourceAdapter {
          * WhatsApp exports carry no message ids, so one is derived from what identifies a message:
          * when it was sent, who sent it and what it said. Re-importing the same export therefore
          * produces the same ids, and provenance recorded earlier keeps pointing at the right messages.
+         *
+         * <p>"When" is the wall-clock time as written in the file, never the instant it resolves to.
+         * The zone is something the caller supplies, not something the file says, so an id built from
+         * the instant changed whenever the same export was imported under a different zone, and every
+         * message was stored a second time. The wall-clock time is rendered as if it were UTC, which
+         * keeps the ids of everything imported under the default UTC zone exactly as they were.
          */
         private String deriveSourceMessageId(String body, Map<String, Integer> collisions) {
-            String identity = sentAt + "|" + senderId + "|" + body;
+            String identity = wallClock.toInstant(ZoneOffset.UTC) + "|" + senderId + "|" + body;
             String digest = sha256Hex(identity).substring(0, 16);
             int seen = collisions.merge(digest, 1, Integer::sum);
             return seen == 1 ? digest : digest + "-" + seen;

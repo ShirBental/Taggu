@@ -131,6 +131,24 @@ class ImportApiTest {
     }
 
     @Test
+    @DisplayName("uploading the same export under a different zone stores nothing new")
+    void reimportUnderAnotherZoneIsIdempotent() throws Exception {
+        mockMvc.perform(multipart("/api/import/whatsapp")
+                        .file(export())
+                        .param("conversationId", "zones")
+                        .param("zone", "UTC"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.newMessages").value(7));
+
+        mockMvc.perform(multipart("/api/import/whatsapp")
+                        .file(export())
+                        .param("conversationId", "zones")
+                        .param("zone", "Asia/Jerusalem"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.newMessages").value(0));
+    }
+
+    @Test
     @DisplayName("unreadable lines are echoed back only when the caller asks")
     void echoesRawLinesOnlyOnRequest() throws Exception {
         mockMvc.perform(multipart("/api/import/whatsapp")
